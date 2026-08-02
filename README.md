@@ -6,5 +6,5 @@
 
 # Shulker
 ### Shulker and Turtle ESP
-* Highlights Shulker position in blue
+* Highlights Shulker position in blue and turtles in green
 * Rendering updates dynamically
