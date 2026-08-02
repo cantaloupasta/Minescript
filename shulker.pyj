@@ -1,0 +1,41 @@
+#!python
+from minescript import *
+
+# Load Mojang's internal classes
+Gizmos, GizmoStyle, AABB, ARGB = (
+    JavaClass("net.minecraft.gizmos.Gizmos"),
+    JavaClass("net.minecraft.gizmos.GizmoStyle"),
+    JavaClass("net.minecraft.world.phys.AABB"),
+    JavaClass("net.minecraft.util.ARGB")
+)
+
+# Color configurations (Opaque outlines, 50-alpha translucent fills)
+shulker_box = GizmoStyle.strokeAndFill(ARGB.color(255, 0, 240, 255), JavaFloat(1.5), ARGB.color(50, 0, 240, 255))
+turtle_box  = GizmoStyle.strokeAndFill(ARGB.color(255, 0, 255, 100), JavaFloat(1.5), ARGB.color(50, 0, 255, 100))
+
+def on_render(event):
+    for entity in get_entities():
+        try:
+            if entity is None or entity.type is None or entity.position is None:
+                continue
+
+            e_type = str(entity.type).lower()
+            x, y, z = entity.position
+
+            # Target Check 1: Shulkers
+            if "shulker" in e_type and "bullet" not in e_type:
+                box = AABB(JavaFloat(x - 0.5), JavaFloat(y), JavaFloat(z - 0.5), 
+                           JavaFloat(x + 0.5), JavaFloat(y + 1.0), JavaFloat(z + 0.5))
+                Gizmos.cuboid(box, shulker_box).setAlwaysOnTop()
+
+            # Target Check 2: Turtles (Slightly lower height box to match model)
+            elif "turtle" in e_type:
+                box = AABB(JavaFloat(x - 0.6), JavaFloat(y), JavaFloat(z - 0.6), 
+                           JavaFloat(x + 0.6), JavaFloat(y + 0.5), JavaFloat(z + 0.6))
+                Gizmos.cuboid(box, turtle_box).setAlwaysOnTop()
+
+        except:
+            continue
+
+add_event_listener("render", on_render)
+echo("§b§l[RADAR]§r See-through Shulker & Turtle waypoints active!")
