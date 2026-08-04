@@ -1,0 +1,140 @@
+from system.pyj.minescript import *
+import minescript as m
+
+# Java Class Bindings via Pyjinn
+Minecraft = JavaClass("net.minecraft.client.Minecraft")
+MutableBlockPos = JavaClass("net.minecraft.core.BlockPos$MutableBlockPos")
+Gizmos = JavaClass("net.minecraft.gizmos.Gizmos")
+GizmoStyle = JavaClass("net.minecraft.gizmos.GizmoStyle")
+AABB = JavaClass("net.minecraft.world.phys.AABB")
+ARGB = JavaClass("net.minecraft.util.ARGB")
+
+mc = Minecraft.getInstance()
+mutable_pos = MutableBlockPos()
+
+# Color configuration: Golden Yellow
+# ARGB format: (Alpha, Red, Green, Blue)
+gold_stroke = ARGB.color(255, 255, 215, 0)
+gold_fill   = ARGB.color(100, 255, 215, 0)
+golden_yellow_box = GizmoStyle.strokeAndFill(gold_stroke, JavaFloat(1.5), gold_fill)
+
+cached_render_boxes = []
+scan_finished = True
+scanner_instance = None
+
+def get_block_fast(x, y, z):
+    if mc.level is None:
+        return None
+    return mc.level.getBlockState(mutable_pos.set(x, y, z)).getBlock()
+
+def background_bee_scanner(player_x, player_z):
+    """
+    Scans the actual loaded render distance for Bee Nests and checks
+    if a trapdoor is directly on top of them.
+    """
+    
+    # Dynamically pull the player's exact render distance from video settings
+    try:
+        render_distance_chunks = mc.options.renderDistance().get()
+    except:
+        render_distance_chunks = 8 
+        
+    radius_blocks = render_distance_chunks * 16
+    
+    min_x = player_x - radius_blocks
+    max_x = player_x + radius_blocks
+    min_z = player_z - radius_blocks
+    max_z = player_z + radius_blocks
+    
+    # Standard Overworld Y-bounds
+    min_y = -64
+    max_y = 320
+
+    m.echo(f"§e[RADAR] Scanning {render_distance_chunks}-chunk radius for nest/trapdoor stack pairs...")
+
+    blocks_per_tick = 50000
+    blocks_scanned_this_tick = 0
+    match_count = 0
+
+    for x in range(min_x, max_x + 1):
+        for z in range(min_z, max_z + 1):
+            for y in range(min_y, max_y + 1):
+                block = get_block_fast(x, y, z)
+                if block is None:
+                    continue
+                
+                block_name = str(block)
+
+                # Only trigger logic if we hit a Bee Nest
+                if "bee_nest" in block_name:
+                    trapdoor_pos = None
+                    
+                    # Check ONLY the block directly on top of the nest (y + 1)
+                    adj_block = get_block_fast(x, y + 1, z)
+                    if adj_block and "trapdoor" in str(adj_block):
+                        trapdoor_pos = (x, y + 1, z)
+                    
+                    # If a trapdoor was found directly on top, render the pair
+                    if trapdoor_pos:
+                        match_count += 1
+                        
+                        # Render the Nest
+                        box_nest = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z), 
+                                   JavaFloat(x + 1.0), JavaFloat(y + 1.25), JavaFloat(z + 1.0))
+                        cached_render_boxes.append((box_nest, golden_yellow_box))
+                        
+                        # Render the Trapdoor
+                        tx, ty, tz = trapdoor_pos
+                        box_trap = AABB(JavaFloat(tx), JavaFloat(ty), JavaFloat(tz), 
+                                   JavaFloat(tx + 1.0), JavaFloat(ty + 0.25), JavaFloat(tz + 1.0))
+                        cached_render_boxes.append((box_trap, golden_yellow_box))
+                        
+                    # Account for the extra top block check in our lag-prevention limit
+                    blocks_scanned_this_tick += 1 
+
+                blocks_scanned_this_tick += 1
+
+                # Yield to the game loop to prevent freezing the client
+                if blocks_scanned_this_tick >= blocks_per_tick:
+                    yield False
+                    blocks_scanned_this_tick = 0
+
+    m.echo(f"§a§l[RADAR] §rScan complete! Found {match_count} vertical pairs.")
+    m.echo("§e█§r: Bee Nest / Trapdoor Pairs")
+    yield True
+
+def start_scan(event):
+    """Press Mouse Button 4 to trigger the scan."""
+    global scan_finished, scanner_instance, cached_render_boxes
+
+    if event.button == 3 and event.action == 1:
+        if mc.player is not None:
+            cached_render_boxes.clear()
+            ppos = mc.player.position()
+            scanner_instance = background_bee_scanner(int(ppos.x), int(ppos.z))
+            scan_finished = False
+
+def on_tick(event):
+    """Processes the scanner generator chunk-by-chunk per tick."""
+    global scan_finished
+    if not scan_finished and scanner_instance is not None:
+        try:
+            if next(scanner_instance) == True:
+                scan_finished = True
+        except StopIteration:
+            scan_finished = True
+
+def on_render(event):
+    """Draws the cached AABB boxes to the screen using Gizmos."""
+    for box, style in cached_render_boxes:
+        try:
+            Gizmos.cuboid(box, style).setAlwaysOnTop()
+        except:
+            pass
+
+# Register Event Listeners
+add_event_listener("tick", on_tick)
+add_event_listener("render", on_render)
+add_event_listener("mouse", start_scan)
+
+m.echo("§d[RADAR Ready] Click Mouse Button 4 to scan your full render distance.")
