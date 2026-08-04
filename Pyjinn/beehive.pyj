@@ -1,3 +1,4 @@
+#! python
 from system.pyj.minescript import *
 import minescript as m
 
