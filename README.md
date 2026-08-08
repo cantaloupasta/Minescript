@@ -4,7 +4,7 @@
 * Searches for 1x1 lava blocks valid for worm fishing, rendered in blue.
 * Can only scans for lava in your render distance (8 chunks)
 
-# [Shulker](Pyjinn/shulker.pyj)
+# [Shulker](Pyjinn/esp.pyj)
 ### Shulker/Turtle/Armadillo ESP
 * Highlights Shulker position in blue/Turtles in green/Armadillos in pink
 * Rendering updates dynamically
