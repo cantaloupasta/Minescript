@@ -10,6 +10,6 @@
 * Rendering updates dynamically
 
 # [Beehive](Pyjinn/beehive.pyj)
-### Beehive w/ trapdoor on top scanner w/ waypoints
+### Beehive + trapdoor on top scanner w/ waypoints
 * Highlights the position of the Honey Hives in the Torrhus Canyon
 * I already compiled the [Waypoints](Pyjinn/honeyhive_waypoints) into Skyblocker form (they are ordered too)
