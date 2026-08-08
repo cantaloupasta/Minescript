@@ -6,7 +6,7 @@
 
 # [Shulker](Pyjinn/shulker.pyj)
 ### Shulker and Turtle ESP
-* Highlights Shulker position in blue and turtles in green
+* Highlights Shulker position in blue/Turtles in green/Armadillos in pink
 * Rendering updates dynamically
 
 # [Beehive](Pyjinn/beehive.pyj)
