@@ -5,7 +5,7 @@
 * Can only scans for lava in your render distance (8 chunks)
 
 # [Shulker](Pyjinn/shulker.pyj)
-### Shulker and Turtle ESP
+### Shulker/Turtle/Armadillo ESP
 * Highlights Shulker position in blue/Turtles in green/Armadillos in pink
 * Rendering updates dynamically
 
