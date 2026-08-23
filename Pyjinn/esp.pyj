@@ -13,6 +13,7 @@ Gizmos, GizmoStyle, AABB, ARGB = (
 shulker_box = GizmoStyle.strokeAndFill(ARGB.color(255, 0, 240, 255), JavaFloat(1.5), ARGB.color(50, 0, 240, 255))
 turtle_box  = GizmoStyle.strokeAndFill(ARGB.color(255, 0, 255, 100), JavaFloat(1.5), ARGB.color(50, 0, 255, 100))
 armadillo_box = GizmoStyle.strokeAndFill(ARGB.color(255, 255, 0, 255), JavaFloat(1.5), ARGB.color(50, 255, 0, 255))
+creeper_box = GizmoStyle.strokeAndFill(ARGB.color(255, 0, 255, 100), JavaFloat(1.5), ARGB.color(50, 0, 255, 100))
 def on_render(event):
     for entity in get_entities():
         try:
@@ -39,6 +40,12 @@ def on_render(event):
                 box = AABB(JavaFloat(x - 0.35), JavaFloat(y), JavaFloat(z - 0.35), 
                            JavaFloat(x + 0.35), JavaFloat(y + 0.65), JavaFloat(z + 0.35))
                 Gizmos.cuboid(box, armadillo_box).setAlwaysOnTop()
+            
+            # Target Check 4: Creepers
+            elif "creeper" in e_type:
+                box = AABB(JavaFloat(x - 0.3), JavaFloat(y), JavaFloat(z - 0.3), 
+                           JavaFloat(x + 0.3), JavaFloat(y + 1.7), JavaFloat(z + 0.3))
+                Gizmos.cuboid(box, creeper_box).setAlwaysOnTop()
 
         except:
             continue
