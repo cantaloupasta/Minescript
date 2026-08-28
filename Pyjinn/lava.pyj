@@ -1,4 +1,3 @@
-#!python
 from system.pyj.minescript import *
 import minescript as m
 
@@ -6,6 +5,7 @@ import minescript as m
 Minecraft = JavaClass("net.minecraft.client.Minecraft")
 Blocks = JavaClass("net.minecraft.world.level.block.Blocks")
 MutableBlockPos = JavaClass("net.minecraft.core.BlockPos$MutableBlockPos")
+Fluids = JavaClass("net.minecraft.world.level.material.Fluids")
 
 # Rendering Bindings
 Gizmos = JavaClass("net.minecraft.gizmos.Gizmos")
@@ -16,13 +16,22 @@ ARGB = JavaClass("net.minecraft.util.ARGB")
 mc = Minecraft.getInstance()
 mutable_pos = MutableBlockPos()
 
+# --- Optional legacy fallback ---------------------------------------------
+# On some versions/forks, flowing lava is still a separate registered block
+# (pre-1.13 style: Blocks.FLOWING_LAVA). Modern versions merged it into a
+# single Blocks.LAVA block distinguished only by the LEVEL blockstate
+# property, so this class may not exist. We grab it defensively and fall
+# back to None if it's missing.
+try:
+    FLOWING_LAVA_BLOCK = Blocks.FLOWING_LAVA
+except:
+    FLOWING_LAVA_BLOCK = None
+
 # Color configurations
 lava_high_box = GizmoStyle.strokeAndFill(ARGB.color(255, 0, 100, 255), JavaFloat(1.5), ARGB.color(50, 0, 100, 255))
 lava_mid_box  = GizmoStyle.strokeAndFill(ARGB.color(255, 255, 50, 50), JavaFloat(1.5), ARGB.color(50, 255, 50, 50))
 
-# Target Region Boundaries for High Lava (Blue Box)
-TARGET_X_MIN, TARGET_X_MAX = 560, 823
-TARGET_Z_MIN, TARGET_Z_MAX = 516, 823
+# Y-level thresholds
 Y_MIN_SCAN, Y_MAX_SCAN = 63, 187
 
 # 8 chunks * 16 blocks = 128 block radius
@@ -32,16 +41,52 @@ cached_render_boxes = []
 scan_finished = True
 scanner_instance = None
 
-def get_block_fast(x, y, z):
+
+def get_blockstate_fast(x, y, z):
+    """Returns the BlockState at (x, y, z), or None if no level is loaded."""
     if mc.level is None:
         return None
-    return mc.level.getBlockState(mutable_pos.set(x, y, z)).getBlock()
+    return mc.level.getBlockState(mutable_pos.set(x, y, z))
+
+
+def is_lava_fast(x, y, z):
+    """
+    Returns True if the block at (x, y, z) is lava - source OR flowing.
+
+    Primary method: check the block's FluidState type against Fluids.LAVA
+    (source) and Fluids.FLOWING_LAVA (flowing). These are the fluid-side
+    equivalents that still exist even in modern versions where the BLOCK
+    itself was merged into a single Blocks.LAVA - the underlying Fluid
+    type still distinguishes source vs flowing, so this reliably catches
+    both. (Note: we deliberately avoid FluidState.is(TagKey) here because
+    `is` is a reserved keyword in Pyjinn and breaks the parser.)
+
+    Fallback: direct Block identity comparison against Blocks.LAVA and,
+    if present, the legacy Blocks.FLOWING_LAVA block - used only if the
+    fluid-state lookup fails for some reason (e.g. unusual binding issue).
+    """
+    state = get_blockstate_fast(x, y, z)
+    if state is None:
+        return False
+
+    try:
+        fluid_type = state.getFluidState().getType()
+        return fluid_type == Fluids.LAVA or fluid_type == Fluids.FLOWING_LAVA
+    except:
+        block = state.getBlock()
+        if block == Blocks.LAVA:
+            return True
+        if FLOWING_LAVA_BLOCK is not None and block == FLOWING_LAVA_BLOCK:
+            return True
+        return False
+
 
 def background_lava_scanner(player_x, player_z):
     """
     Scans the loaded 8-chunk radius:
     - Red boxes (Y=63-64): Scanned across the ENTIRE 8-chunk render distance.
     - Blue boxes (Y>=65): Scanned ONLY within the specified target region.
+    Detects both lava source blocks AND flowing lava.
     """
     # 1. Full 8-chunk boundary around player
     loaded_x_min = player_x - RENDER_DISTANCE_BLOCKS
@@ -57,17 +102,12 @@ def background_lava_scanner(player_x, player_z):
 
     for x in range(loaded_x_min, loaded_x_max + 1):
         for z in range(loaded_z_min, loaded_z_max + 1):
-            
-            # Check if this (x, z) column is within the specific target zone for Blue boxes
-            in_blue_zone = (TARGET_X_MIN <= x <= TARGET_X_MAX) and (TARGET_Z_MIN <= z <= TARGET_Z_MAX)
 
             for y in range(Y_MIN_SCAN, Y_MAX_SCAN + 1):
-                block = get_block_fast(x, y, z)
-
-                if block == Blocks.LAVA:
-                    # Blue Box (High Lava): RESTRICTED to target region
-                    if y >= 65 and in_blue_zone:
-                        box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z), 
+                if is_lava_fast(x, y, z):
+                    # Blue Box (High Lava): now uses the SAME scan boundary as everything else
+                    if y >= 65:
+                        box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
                                    JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
                         cached_render_boxes.append((box, lava_high_box))
                         match_count += 1
@@ -75,20 +115,20 @@ def background_lava_scanner(player_x, player_z):
                     # Red Box (Mid-level Lava): UNRESTRICTED across entire 8-chunk radius
                     elif y == 63 or y == 64:
                         # Verify base block is 1-tall
-                        if get_block_fast(x, y + 1, z) != Blocks.LAVA and get_block_fast(x, y - 1, z) != Blocks.LAVA:
-                            
+                        if not is_lava_fast(x, y + 1, z) and not is_lava_fast(x, y - 1, z):
+
                             # Attempt +X pair
-                            if get_block_fast(x + 1, y, z) == Blocks.LAVA:
-                                if get_block_fast(x + 1, y + 1, z) != Blocks.LAVA and get_block_fast(x + 1, y - 1, z) != Blocks.LAVA:
-                                    box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z), 
+                            if is_lava_fast(x + 1, y, z):
+                                if not is_lava_fast(x + 1, y + 1, z) and not is_lava_fast(x + 1, y - 1, z):
+                                    box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
                                                JavaFloat(x + 2.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
                                     cached_render_boxes.append((box, lava_mid_box))
                                     match_count += 1
 
                             # Attempt +Z pair
-                            if get_block_fast(x, y, z + 1) == Blocks.LAVA:
-                                if get_block_fast(x, y + 1, z + 1) != Blocks.LAVA and get_block_fast(x, y - 1, z + 1) != Blocks.LAVA:
-                                    box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z), 
+                            if is_lava_fast(x, y, z + 1):
+                                if not is_lava_fast(x, y + 1, z + 1) and not is_lava_fast(x, y - 1, z + 1):
+                                    box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
                                                JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 2.0))
                                     cached_render_boxes.append((box, lava_mid_box))
                                     match_count += 1
@@ -105,6 +145,7 @@ def background_lava_scanner(player_x, player_z):
     echo("§4█§r: Magma Core Fishing")
     yield True
 
+
 def start_scan(event):
     """Press Mouse Button 4 (or Middle Click depending on your mouse) to trigger the scan."""
     global scan_finished, scanner_instance, cached_render_boxes
@@ -116,6 +157,7 @@ def start_scan(event):
             scanner_instance = background_lava_scanner(int(ppos.x), int(ppos.z))
             scan_finished = False
 
+
 def on_tick(event):
     global scan_finished
     if not scan_finished and scanner_instance is not None:
@@ -125,12 +167,14 @@ def on_tick(event):
         except StopIteration:
             scan_finished = True
 
+
 def on_render(event):
     for box, style in cached_render_boxes:
         try:
             Gizmos.cuboid(box, style).setAlwaysOnTop()
         except:
             pass
+
 
 add_event_listener("tick", on_tick)
 add_event_listener("render", on_render)
