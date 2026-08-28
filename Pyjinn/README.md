@@ -12,4 +12,4 @@
 # [Beehive](beehive.pyj)
 ### Beehive + trapdoor on top scanner w/ waypoints
 * Highlights the position of the Honey Hives in the Torrhus Canyon
-* I already compiled the [Ordered Waypoints](Pyjinn/honeyhive_waypoints) into Skyblocker form, copy the text and import
+* I already compiled the [Ordered Waypoints](honeyhive_waypoints) into Skyblocker form, copy the text and import
