@@ -1,4 +1,4 @@
-#! python
+#!python
 from system.pyj.minescript import *
 import minescript as m
 
@@ -17,12 +17,7 @@ ARGB = JavaClass("net.minecraft.util.ARGB")
 mc = Minecraft.getInstance()
 mutable_pos = MutableBlockPos()
 
-# --- Optional legacy fallback ---------------------------------------------
-# On some versions/forks, flowing lava is still a separate registered block
-# (pre-1.13 style: Blocks.FLOWING_LAVA). Modern versions merged it into a
-# single Blocks.LAVA block distinguished only by the LEVEL blockstate
-# property, so this class may not exist. We grab it defensively and fall
-# back to None if it's missing.
+# --- Optional legacy fallback ---
 try:
     FLOWING_LAVA_BLOCK = Blocks.FLOWING_LAVA
 except:
@@ -38,6 +33,10 @@ Y_MIN_SCAN, Y_MAX_SCAN = 63, 187
 # 8 chunks * 16 blocks = 128 block radius
 RENDER_DISTANCE_BLOCKS = 128
 
+# Fixed boundary box constraints (Corner 1: 560, 513 | Corner 2: 823, 823)
+BOUND_X_MIN, BOUND_X_MAX = min(560, 823), max(560, 823)
+BOUND_Z_MIN, BOUND_Z_MAX = min(513, 823), max(513, 823)
+
 cached_render_boxes = []
 scan_finished = True
 scanner_instance = None
@@ -51,21 +50,7 @@ def get_blockstate_fast(x, y, z):
 
 
 def is_lava_fast(x, y, z):
-    """
-    Returns True if the block at (x, y, z) is lava - source OR flowing.
-
-    Primary method: check the block's FluidState type against Fluids.LAVA
-    (source) and Fluids.FLOWING_LAVA (flowing). These are the fluid-side
-    equivalents that still exist even in modern versions where the BLOCK
-    itself was merged into a single Blocks.LAVA - the underlying Fluid
-    type still distinguishes source vs flowing, so this reliably catches
-    both. (Note: we deliberately avoid FluidState.is(TagKey) here because
-    `is` is a reserved keyword in Pyjinn and breaks the parser.)
-
-    Fallback: direct Block identity comparison against Blocks.LAVA and,
-    if present, the legacy Blocks.FLOWING_LAVA block - used only if the
-    fluid-state lookup fails for some reason (e.g. unusual binding issue).
-    """
+    """Returns True if the block at (x, y, z) is lava - source OR flowing."""
     state = get_blockstate_fast(x, y, z)
     if state is None:
         return False
@@ -84,38 +69,42 @@ def is_lava_fast(x, y, z):
 
 def background_lava_scanner(player_x, player_z):
     """
-    Scans the loaded 8-chunk radius:
-    - Red boxes (Y=63-64): Scanned across the ENTIRE 8-chunk render distance.
-    - Blue boxes (Y>=65): Scanned ONLY within the specified target region.
-    Detects both lava source blocks AND flowing lava.
+    Scans the intersection of the 8-chunk radius and the specified bounding box:
+    - Corner 1: (560, 513)
+    - Corner 2: (823, 823)
     """
-    # 1. Full 8-chunk boundary around player
-    loaded_x_min = player_x - RENDER_DISTANCE_BLOCKS
-    loaded_x_max = player_x + RENDER_DISTANCE_BLOCKS
-    loaded_z_min = player_z - RENDER_DISTANCE_BLOCKS
-    loaded_z_max = player_z + RENDER_DISTANCE_BLOCKS
+    # Calculate intersection between 8-chunk render distance and fixed bounds
+    scan_x_min = max(player_x - RENDER_DISTANCE_BLOCKS, BOUND_X_MIN)
+    scan_x_max = min(player_x + RENDER_DISTANCE_BLOCKS, BOUND_X_MAX)
+    scan_z_min = max(player_z - RENDER_DISTANCE_BLOCKS, BOUND_Z_MIN)
+    scan_z_max = min(player_z + RENDER_DISTANCE_BLOCKS, BOUND_Z_MAX)
 
-    echo(f"§e[RADAR] Scanning 8-chunk radius around player (X: {loaded_x_min} to {loaded_x_max}, Z: {loaded_z_min} to {loaded_z_max})...")
+    # Check if player is completely out of reach of the target area
+    if scan_x_min > scan_x_max or scan_z_min > scan_z_max:
+        echo("§c[RADAR] Out of range! Target box is outside your 8-chunk radius.")
+        yield True
+        return
+
+    echo(f"§e[RADAR] Scanning bounded area (X: {scan_x_min} to {scan_x_max}, Z: {scan_z_min} to {scan_z_max})...")
 
     blocks_per_tick = 50000
     blocks_scanned_this_tick = 0
     match_count = 0
 
-    for x in range(loaded_x_min, loaded_x_max + 1):
-        for z in range(loaded_z_min, loaded_z_max + 1):
+    for x in range(scan_x_min, scan_x_max + 1):
+        for z in range(scan_z_min, scan_z_max + 1):
 
             for y in range(Y_MIN_SCAN, Y_MAX_SCAN + 1):
                 if is_lava_fast(x, y, z):
-                    # Blue Box (High Lava): now uses the SAME scan boundary as everything else
+                    # Blue Box (High Lava)
                     if y >= 65:
                         box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
                                    JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
                         cached_render_boxes.append((box, lava_high_box))
                         match_count += 1
 
-                    # Red Box (Mid-level Lava): UNRESTRICTED across entire 8-chunk radius
+                    # Red Box (Mid-level Lava)
                     elif y == 63 or y == 64:
-                        # Verify base block is 1-tall
                         if not is_lava_fast(x, y + 1, z) and not is_lava_fast(x, y - 1, z):
 
                             # Attempt +X pair
@@ -148,7 +137,7 @@ def background_lava_scanner(player_x, player_z):
 
 
 def start_scan(event):
-    """Press Mouse Button 4 (or Middle Click depending on your mouse) to trigger the scan."""
+    """Press Mouse Button 4 to trigger the scan."""
     global scan_finished, scanner_instance, cached_render_boxes
 
     if event.button == 3 and event.action == 1:
@@ -181,4 +170,4 @@ add_event_listener("tick", on_tick)
 add_event_listener("render", on_render)
 add_event_listener("mouse", start_scan)
 
-m.echo("§d[RADAR Ready] Click Mouse Button 4 to scan the 8-chunk radius around you.")
+m.echo("§d[RADAR Ready] Click Mouse Button 4 to scan inside target box.")
