@@ -1,5 +1,7 @@
 # Fishing script v1
 Prototype of a multifishing bot for Skyblock (Disclaimer: some of the script is vibe coded)
+
+Even has a sort of app to change settings and stuff!
 ### Modes
 * Default
 * Treasure
