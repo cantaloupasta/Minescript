@@ -1,7 +1,9 @@
-# Fishing script v1
+# [Fishing script v1](Minescript/Python/fish.py)
 Prototype of a multifishing bot for Skyblock (Disclaimer: some of the script is vibe coded)
 
 Even has a sort of app to change settings and stuff!
+
+### NEEDS [EVENTLIB](https://github.com/SmartBoty/Minescript/tree/main/eventlib) TO WORK
 ### Modes
 * Default
 * Treasure
