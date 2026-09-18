@@ -2,7 +2,7 @@
 ### Lava scanner w/ waypoints
 * Searches for 2x1 lava pockets valid for magma core fishing, rendered in red.
 * Searches for 1x1 lava blocks valid for worm fishing, rendered in blue.
-* Can only scans for lava in your render distance (8 chunks)
+* Can only scans for lava in your render distance (8 chunks) in precursor remnants
 
 # [ESP](esp.pyj)
 ### Shulker/Turtle/Armadillo/Creeper ESP
@@ -13,3 +13,8 @@
 ### Beehive + trapdoor on top scanner w/ waypoints
 * Highlights the position of the Honey Hives in the Torrhus Canyon
 * I already compiled the [Ordered Waypoints](honeyhive_waypoints) into Skyblocker form, copy the text and import
+
+# [Corleone](corleone.pyj)
+### corleone finder
+* Searches for cyan terracotta, ladders and spruce planks that are in close proximity
+* Can only scans for blocks in your render distance (8 chunks) in mithril deposits
