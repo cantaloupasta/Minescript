@@ -15,6 +15,6 @@
 * I already compiled the [Ordered Waypoints](honeyhive_waypoints) into Skyblocker form, copy the text and import
 
 # [Corleone](corleone.pyj)
-### corleone finder
+### Corleone finder
 * Searches for cyan terracotta, ladders and spruce planks that are in close proximity
 * Can only scans for blocks in your render distance (8 chunks) in mithril deposits
