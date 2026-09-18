@@ -50,12 +50,15 @@ def safe_entities(**kwargs):
 # Mirrors SkyHanni's GoldenFishTimer.kt: confirms via (1) the spawn chat line
 # and (2) a nearby armor stand wearing a player_head skin.
 #
-# Chat is handled via eventlib's INCOMING_CHAT_INTERCEPT (plain chat listeners
-# are unreliable here; same workaround used for "not enough space"). On the
-# spawn line, Python does a direct entities(nbt=True) scan for speed, falling
-# back to the Pyjinn sticky-lock scanner (runs continuously on "render") if
-# the entity hasn't loaded client-side yet. chat_listener_worker() does the
-# confirmation/echo and feeds the resolved UUID to the aim/use step.
+# Chat is handled via eventlib's CHAT listener (eventlib=True), which
+# populates a `.json` field on top of the normal chat text. Unlike the old
+# INCOMING_CHAT_INTERCEPT approach, this listener is purely observational --
+# it doesn't cancel/hide incoming chat lines, so normal chat still displays
+# for the player the whole time the bot runs. On the spawn line, Python does
+# a direct entities(nbt=True) scan for speed, falling back to the Pyjinn
+# sticky-lock scanner (runs continuously on "render") if the entity hasn't
+# loaded client-side yet. chat_listener_worker() does the confirmation/echo
+# and feeds the resolved UUID to the aim/use step.
 #
 # NOTE: NBT-scan reliability unverified; Pyjinn scanner logs (not chats) each
 # new sighting so you can tail latest.log to confirm it's firing independently.
@@ -482,14 +485,17 @@ def is_worm_chimney():
 # ==============================================================================
 # CHAT LISTENER ACTIVATION (mode-gated)
 # ==============================================================================
-# eventlib's interceptor cancels EVERY incoming chat line while registered,
-# so normal chat is invisible the whole time window.py runs unless gated.
-# Only needed for: Trophy (golden fish text), Magma/Strider ("not enough
-# space"), Worm/Funnel ("not enough space"). Not needed for Default,
-# Treasure, or Worm/Chimney -- toggled on/off to match the selected mode.
-chat_interceptor_registered = False        # is interception currently ON?
-chat_interceptor_ever_registered = False   # has register_incoming_chat_interceptor() ever been called?
-_chat_interceptor_lock = Lock()
+# Uses eventlib's plain CHAT listener (register_chat_listener(eventlib=True))
+# rather than the old INCOMING_CHAT_INTERCEPT approach. This listener is
+# purely observational -- it does NOT cancel/hide incoming chat lines, so
+# normal chat stays visible to the player the whole time window.py runs.
+# It's still mode-gated (on/off) simply to avoid running the extra listener
+# and its per-line processing for modes that don't need it: Trophy (golden
+# fish text), Magma/Strider ("not enough space"), Worm/Funnel ("not enough
+# space"). Not needed for Default, Treasure, or Worm/Chimney.
+chat_listener_registered = False        # is the eventlib chat listener currently ON?
+chat_listener_ever_registered = False   # has register_chat_listener(eventlib=True) ever been called?
+_chat_listener_lock = Lock()
 
 
 def mode_needs_chat_listener():
@@ -501,31 +507,31 @@ def mode_needs_chat_listener():
     return False
 
 
-def _set_chat_interceptor_state(enabled):
-    """Flips the eventlib interceptor's Java-side 'state' flag directly
-    (mirrors register/unregister_all) -- used after first registration so
-    the queue isn't re-appended and events don't get delivered twice."""
+def _set_chat_listener_state(enabled):
+    """Flips the eventlib chat listener's Java-side flag directly (mirrors
+    register/unregister_all) -- used after first registration so the queue
+    isn't re-appended and events don't get delivered twice."""
     execute(
-        fr"""\eval '0' '__script__.vars["game"]["eventlib"]["{identifier}"]["intercept_incoming_chat"]["state"] = {enabled}'"""
+        fr"""\eval '0' '__script__.vars["game"]["eventlib"]["{identifier}"]["chat_listener"] = {enabled}'"""
     )
 
 
-def update_chat_interceptor_state():
-    """Enables/disables the chat interceptor to match whether the current
-    mode needs it. Safe to call any time the mode selection changes."""
-    global chat_interceptor_registered, chat_interceptor_ever_registered
-    with _chat_interceptor_lock:
+def update_chat_listener_state():
+    """Enables/disables the eventlib chat listener to match whether the
+    current mode needs it. Safe to call any time the mode selection changes."""
+    global chat_listener_registered, chat_listener_ever_registered
+    with _chat_listener_lock:
         needed = mode_needs_chat_listener()
-        if needed and not chat_interceptor_registered:
-            if not chat_interceptor_ever_registered:
-                events.register_incoming_chat_interceptor()
-                chat_interceptor_ever_registered = True
+        if needed and not chat_listener_registered:
+            if not chat_listener_ever_registered:
+                events.register_chat_listener(eventlib=True)
+                chat_listener_ever_registered = True
             else:
-                _set_chat_interceptor_state(True)
-            chat_interceptor_registered = True
-        elif not needed and chat_interceptor_registered:
-            _set_chat_interceptor_state(False)
-            chat_interceptor_registered = False
+                _set_chat_listener_state(True)
+            chat_listener_registered = True
+        elif not needed and chat_listener_registered:
+            _set_chat_listener_state(False)
+            chat_listener_registered = False
 
 
 def attack_magma(detect_distance):
@@ -791,11 +797,11 @@ def fishing_loop():
 # ==============================================================================
 def chat_listener_worker():
     global space_full, golden_fish_confirmed, golden_fish_uuid
-    update_chat_interceptor_state()  # only registers/enables if the starting mode needs it
+    update_chat_listener_state()  # only registers/enables if the starting mode needs it
     while True:
         event = events.get()
 
-        if event.type != EventType.INCOMING_CHAT_INTERCEPT:
+        if event.type != EventType.CHAT:
             continue
 
         if "There is not enough space" in event.message:
@@ -895,7 +901,7 @@ def on_mode_change():
     else:
         chk_totem.config(state="normal")
 
-    update_chat_interceptor_state()
+    update_chat_listener_state()
 
 
 def validate_slots():
