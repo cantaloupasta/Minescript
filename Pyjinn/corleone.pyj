@@ -1,0 +1,203 @@
+from system.pyj.minescript import *
+import minescript as m
+
+# Java Class Bindings via Pyjinn
+Minecraft = JavaClass("net.minecraft.client.Minecraft")
+Blocks = JavaClass("net.minecraft.world.level.block.Blocks")
+MutableBlockPos = JavaClass("net.minecraft.core.BlockPos$MutableBlockPos")
+
+# Rendering Bindings
+Gizmos = JavaClass("net.minecraft.gizmos.Gizmos")
+GizmoStyle = JavaClass("net.minecraft.gizmos.GizmoStyle")
+AABB = JavaClass("net.minecraft.world.phys.AABB")
+ARGB = JavaClass("net.minecraft.util.ARGB")
+
+mc = Minecraft.getInstance()
+mutable_pos = MutableBlockPos()
+
+# Color configurations
+ladder_box_style = GizmoStyle.strokeAndFill(
+    ARGB.color(255, 255, 255, 0),   # Solid Yellow
+    JavaFloat(1.5), 
+    ARGB.color(80, 255, 255, 0)     # Semi-transparent Yellow
+)
+
+terracotta_box_style = GizmoStyle.strokeAndFill(
+    ARGB.color(255, 150, 150, 150), # Solid Grey
+    JavaFloat(1.5), 
+    ARGB.color(80, 150, 150, 150)   # Semi-transparent Grey
+)
+
+spruce_box_style = GizmoStyle.strokeAndFill(
+    ARGB.color(255, 139, 69, 19),   # Solid Brown
+    JavaFloat(1.5), 
+    ARGB.color(80, 139, 69, 19)     # Semi-transparent Brown
+)
+
+# Y-level thresholds
+Y_MIN_SCAN, Y_MAX_SCAN = 63, 187
+
+# 8 chunks * 16 blocks = 128 block radius
+RENDER_DISTANCE_BLOCKS = 128
+
+# Maximum distance squared (20 blocks squared = 400)
+MAX_DIST_SQ = 400
+
+cached_render_boxes = []
+scan_finished = True
+scanner_instance = None
+
+
+def get_blockstate_fast(x, y, z):
+    """Returns the BlockState at (x, y, z), or None if no level is loaded."""
+    if mc.level is None:
+        return None
+    return mc.level.getBlockState(mutable_pos.set(x, y, z))
+
+
+def is_spruce_plank(x, y, z):
+    """Helper to check if a specific coordinate is a Spruce Plank."""
+    state = get_blockstate_fast(x, y, z)
+    if state is None:
+        return False
+    return state.getBlock() == Blocks.SPRUCE_PLANKS
+
+
+def dist_sq(pos1, pos2):
+    """Returns squared Euclidean distance between two (x, y, z) tuples."""
+    return (pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2 + (pos1[2] - pos2[2])**2
+
+
+def background_block_scanner(player_x, player_z):
+    """
+    Scans for candidates, then filters to only render targets if a Ladder,
+    exposed Cyan Terracotta, and stacked Spruce Plank are within 20 blocks of each other.
+    """
+    loaded_x_min = max(player_x - RENDER_DISTANCE_BLOCKS, 560)
+    loaded_x_max = min(player_x + RENDER_DISTANCE_BLOCKS, 823)
+    loaded_z_min = max(player_z - RENDER_DISTANCE_BLOCKS, 202)
+    loaded_z_max = min(player_z + RENDER_DISTANCE_BLOCKS, 512)
+
+    echo(f"§e[RADAR] Scanning restricted zone (X: {loaded_x_min} to {loaded_x_max}, Z: {loaded_z_min} to {loaded_z_max})...")
+
+    blocks_per_tick = 50000
+    blocks_scanned_this_tick = 0
+
+    candidate_ladders = []
+    candidate_terracottas = []
+    candidate_spruces = []
+
+    # Phase 1: Collect Candidates
+    if loaded_x_min <= loaded_x_max and loaded_z_min <= loaded_z_max:
+        for x in range(loaded_x_min, loaded_x_max + 1):
+            for z in range(loaded_z_min, loaded_z_max + 1):
+                for y in range(Y_MIN_SCAN, Y_MAX_SCAN + 1):
+                    
+                    state = get_blockstate_fast(x, y, z)
+                    if state is not None:
+                        block = state.getBlock()
+                        
+                        # 1. Candidate Ladder
+                        if block == Blocks.LADDER:
+                            candidate_ladders.append((x, y, z))
+                        
+                        # 2. Candidate Cyan Terracotta (Air/Nothing directly above)
+                        elif block == Blocks.CYAN_TERRACOTTA:
+                            above_state = get_blockstate_fast(x, y + 1, z)
+                            if above_state is None or above_state.getBlock() == Blocks.AIR:
+                                candidate_terracottas.append((x, y, z))
+                        
+                        # 3. Candidate Spruce Planks (Spruce Plank directly above)
+                        elif block == Blocks.SPRUCE_PLANKS:
+                            if is_spruce_plank(x, y + 1, z):
+                                candidate_spruces.append((x, y, z))
+
+                    blocks_scanned_this_tick += 1
+
+                    if blocks_scanned_this_tick >= blocks_per_tick:
+                        yield False
+                        blocks_scanned_this_tick = 0
+
+    # Phase 2: Proximity Filtering (20 blocks range between all 3 target types)
+    valid_ladders = set()
+    valid_terracottas = set()
+    valid_spruces = set()
+
+    for l in candidate_ladders:
+        # Terracottas within 20 blocks of this ladder
+        near_c = [c for c in candidate_terracottas if dist_sq(l, c) <= MAX_DIST_SQ]
+        if not near_c:
+            continue
+            
+        # Spruce Planks within 20 blocks of this ladder
+        near_s = [s for s in candidate_spruces if dist_sq(l, s) <= MAX_DIST_SQ]
+        if not near_s:
+            continue
+
+        # Verify if any Terracotta and Spruce Plank are also within 20 blocks of EACH OTHER
+        for c in near_c:
+            for s in near_s:
+                if dist_sq(c, s) <= MAX_DIST_SQ:
+                    valid_ladders.add(l)
+                    valid_terracottas.add(c)
+                    valid_spruces.add(s)
+
+    # Phase 3: Create Render Boxes for valid clusters
+    for x, y, z in valid_ladders:
+        box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
+                   JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
+        cached_render_boxes.append((box, ladder_box_style))
+
+    for x, y, z in valid_terracottas:
+        box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
+                   JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
+        cached_render_boxes.append((box, terracotta_box_style))
+
+    for x, y, z in valid_spruces:
+        box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
+                   JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
+        cached_render_boxes.append((box, spruce_box_style))
+
+    total_rendered = len(valid_ladders) + len(valid_terracottas) + len(valid_spruces)
+    echo(f"§a§l[RADAR] §rScan complete! Found {total_rendered} blocks corresponding to corleone room.")
+    echo("§e█§r: Ladder")
+    echo("§7█§r: Cyan Terracotta")
+    echo("§6█§r: Stacked Spruce Plank")
+    yield True
+
+
+def start_scan(event):
+    """Press Mouse Button 4 to trigger the scan."""
+    global scan_finished, scanner_instance, cached_render_boxes
+
+    if event.button == 3 and event.action == 1:
+        if mc.player is not None:
+            cached_render_boxes.clear()
+            ppos = mc.player.position()
+            scanner_instance = background_block_scanner(int(ppos.x), int(ppos.z))
+            scan_finished = False
+
+
+def on_tick(event):
+    global scan_finished
+    if not scan_finished and scanner_instance is not None:
+        try:
+            if next(scanner_instance) == True:
+                scan_finished = True
+        except StopIteration:
+            scan_finished = True
+
+
+def on_render(event):
+    for box, style in cached_render_boxes:
+        try:
+            Gizmos.cuboid(box, style).setAlwaysOnTop()
+        except:
+            pass
+
+
+add_event_listener("tick", on_tick)
+add_event_listener("render", on_render)
+add_event_listener("mouse", start_scan)
+
+m.echo("§e[RADAR Ready] Click Mouse Button 4 to scan for corleone.")
