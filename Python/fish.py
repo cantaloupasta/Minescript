@@ -339,6 +339,7 @@ totem_thread_handle = None
 bot_start_time = None
 space_full = False
 current_slot = None
+leapfrog_initial_y = None
 
 saved_yaw = 0.0
 saved_pitch = 0.0
@@ -444,8 +445,10 @@ def press_attack():
     m.player_press_attack(False)
 
 
-def use_rod():
+def use_rod(cast=False):
     select_slot(real_slot(var_slot_rod))
+    if cast:
+        wait_until_airborne()
     press_use()
 
 
@@ -459,7 +462,39 @@ def breathe():
     time.sleep(random.uniform(0.2, 0.3))
     m.player_press_sneak(False)
 
+LEAPFROG_AIRBORNE_WAIT_TIMEOUT = 5.0
 
+def leapfrog_enabled():
+    return running and var_mode.get() == "Trophy" and var_leapfrog.get()
+
+def wait_until_airborne():
+    if not leapfrog_enabled() or leapfrog_initial_y is None:
+        return
+    start = time.time()
+    while leapfrog_enabled():
+        try:
+            _, y, _ = m.player_position()
+        except Exception:
+            return
+        if y > leapfrog_initial_y:
+            return
+        if time.time() - start > LEAPFROG_AIRBORNE_WAIT_TIMEOUT:
+            return
+        time.sleep(0.01)
+
+def leapfrog_jump_worker():
+    holding = False
+    while True:
+        if leapfrog_enabled():
+            if not holding:
+                m.player_press_jump(True)
+                holding = True
+        else:
+            if holding:
+                m.player_press_jump(False)
+                holding = False
+        time.sleep(0.1)
+        
 # ==============================================================================
 # CLEARING / ATTACK MECHANICS (Magma / Worm / Strider)
 # ==============================================================================
@@ -680,7 +715,7 @@ def place_totem_cycle():
 # MAIN FISHING LOOP
 # ==============================================================================
 def fishing_loop():
-    global running, space_full
+    global running, space_full, leapfrog_initial_y
 
     mode = var_mode.get()
     try:
@@ -714,7 +749,7 @@ def fishing_loop():
     last_totem = time.time()
     timeout_count = 0
 
-    use_rod()  # initial cast
+    use_rod(cast=True)  # initial cast
 
     while running:
         # --- auto-lobby check ---
@@ -730,7 +765,7 @@ def fishing_loop():
                 time.sleep(0.05)
                 place_totem_cycle()
                 time.sleep(0.05)
-                use_rod()  # cast the bobber back out
+                use_rod(cast=True)  # cast the bobber back out
                 
                 last_action = time.time()
                 last_totem = time.time()
@@ -739,7 +774,7 @@ def fishing_loop():
         if mode in MODES_WITH_CLEARING and space_full and not is_worm_chimney():
             use_rod()  # reel in before switching to weapon
             handle_clearing(mode, detect_distance)
-            use_rod()  # recast
+            use_rod(cast=True)  # recast
             last_action = time.time()
             continue
 
@@ -748,7 +783,13 @@ def fishing_loop():
             breathe()
             last_breath = time.time()
 
-        # Golden fish handling runs in the background threads (Trophy-gated); nothing to poll here.
+        if mode == "Trophy" and var_leapfrog.get():
+            try:
+                leapfrog_initial_y = m.player_position()[1]
+            except Exception:
+                leapfrog_initial_y = None
+        else:
+            leapfrog_initial_y = None
 
         # --- bite scan ---
         entities = safe_entities(max_distance=detect_distance)
@@ -762,7 +803,7 @@ def fishing_loop():
             use_rod()  # reel in
             last_action = time.time()
             time.sleep(random.uniform(0.01, 0.03))
-            use_rod()  # recast
+            use_rod(cast=True)  # recast
             time.sleep(1.0)
 
         # --- timeout / bobber recovery ---
@@ -776,10 +817,10 @@ def fishing_loop():
                 m.echo(f"Bobber lagging. Timeouts: {timeout_count}/{max_timeouts}")
                 use_rod()
                 time.sleep(random.uniform(0.03, 0.06))
-                use_rod()
+                use_rod(cast=True)
             else:
                 m.echo(f"Bobber missing. Timeouts: {timeout_count}/{max_timeouts}")
-                use_rod()
+                use_rod(cast=True)
             last_action = time.time()
 
             if timeout_count >= max_timeouts:
@@ -949,6 +990,7 @@ root.attributes("-topmost", True)
 
 var_mode = tk.StringVar(value="Default")
 var_worm_submode = tk.StringVar(value="Funnel")
+var_leapfrog = tk.BooleanVar(value=False)
 var_totem = tk.BooleanVar(value=False)
 var_apnea = tk.StringVar(value="90")
 var_detect_distance = tk.StringVar(value="7")
@@ -977,6 +1019,12 @@ for mode_name in ("Default", "Treasure", "Trophy", "Magma", "Worm", "Strider"):
     tk.Radiobutton(
         frame_mode, text=MODE_DISPLAY_NAMES[mode_name], variable=var_mode, value=mode_name, command=on_mode_change
     ).pack(anchor="w")
+    if mode_name == "Trophy":
+        frame_trophy_submode = tk.Frame(frame_mode)
+        frame_trophy_submode.pack(anchor="w", padx=(22, 0))
+        tk.Checkbutton(
+            frame_trophy_submode, text="Leap Frog", variable=var_leapfrog,
+        ).pack(side="left")
 
     if mode_name == "Worm":
         frame_worm_submode = tk.Frame(frame_mode)
@@ -1036,5 +1084,6 @@ Thread(target=chat_listener_worker, daemon=True).start()
 Thread(target=mouse_listener_worker, daemon=True).start()
 Thread(target=golden_fish_tracker_worker, daemon=True).start()
 Thread(target=golden_fish_scanner_worker, daemon=True).start()
+Thread(target=leapfrog_jump_worker, daemon=True).start()
 
 root.mainloop()
