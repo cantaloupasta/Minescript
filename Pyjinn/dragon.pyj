@@ -1,0 +1,147 @@
+#! python
+from system.pyj.minescript import *
+import minescript as m
+
+# Java Class Bindings via Pyjinn
+Minecraft = JavaClass("net.minecraft.client.Minecraft")
+Blocks = JavaClass("net.minecraft.world.level.block.Blocks")
+MutableBlockPos = JavaClass("net.minecraft.core.BlockPos$MutableBlockPos")
+
+# Rendering Bindings
+Gizmos = JavaClass("net.minecraft.gizmos.Gizmos")
+GizmoStyle = JavaClass("net.minecraft.gizmos.GizmoStyle")
+AABB = JavaClass("net.minecraft.world.phys.AABB")
+ARGB = JavaClass("net.minecraft.util.ARGB")
+
+mc = Minecraft.getInstance()
+mutable_pos = MutableBlockPos()
+
+# Color configurations
+red_terracotta_style = GizmoStyle.strokeAndFill(
+    ARGB.color(255, 255, 50, 50),   # Solid Red
+    JavaFloat(1.5), 
+    ARGB.color(80, 255, 50, 50)     # Semi-transparent Red
+)
+
+sandstone_style = GizmoStyle.strokeAndFill(
+    ARGB.color(255, 240, 210, 120), # Solid Beach/Sand Yellow
+    JavaFloat(1.5), 
+    ARGB.color(80, 240, 210, 120)   # Semi-transparent Beach/Sand Yellow
+)
+
+snow_style = GizmoStyle.strokeAndFill(
+    ARGB.color(255, 255, 255, 255), # Solid White
+    JavaFloat(1.5), 
+    ARGB.color(80, 255, 255, 255)   # Semi-transparent White
+)
+
+# Y-level thresholds
+Y_MIN_SCAN, Y_MAX_SCAN = 63, 187
+
+# 8 chunks * 16 blocks = 128 block radius
+RENDER_DISTANCE_BLOCKS = 128
+
+cached_render_boxes = []
+scan_finished = True
+scanner_instance = None
+
+
+def get_blockstate_fast(x, y, z):
+    """Returns the BlockState at (x, y, z), or None if no level is loaded."""
+    if mc.level is None:
+        return None
+    return mc.level.getBlockState(mutable_pos.set(x, y, z))
+
+
+def background_block_scanner(player_x, player_z):
+    """Scans for Red Terracotta, Sandstone, and Snow while tracking itemized counts."""
+    loaded_x_min = max(player_x - RENDER_DISTANCE_BLOCKS, 560)
+    loaded_x_max = min(player_x + RENDER_DISTANCE_BLOCKS, 823)
+    loaded_z_min = max(player_z - RENDER_DISTANCE_BLOCKS, 202)
+    loaded_z_max = min(player_z + RENDER_DISTANCE_BLOCKS, 512)
+
+    echo(f"§e[RADAR] Scanning restricted zone (X: {loaded_x_min} to {loaded_x_max}, Z: {loaded_z_min} to {loaded_z_max})...")
+
+    blocks_per_tick = 50000
+    blocks_scanned_this_tick = 0
+    
+    red_terracotta_count = 0
+    sandstone_count = 0
+    snow_count = 0
+
+    if loaded_x_min <= loaded_x_max and loaded_z_min <= loaded_z_max:
+        for x in range(loaded_x_min, loaded_x_max + 1):
+            for z in range(loaded_z_min, loaded_z_max + 1):
+                for y in range(Y_MIN_SCAN, Y_MAX_SCAN + 1):
+                    
+                    state = get_blockstate_fast(x, y, z)
+                    if state is not None:
+                        block = state.getBlock()
+                        
+                        if block == Blocks.RED_TERRACOTTA:
+                            box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
+                                       JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
+                            cached_render_boxes.append((box, red_terracotta_style))
+                            red_terracotta_count += 1
+                            
+                        elif block == Blocks.SANDSTONE:
+                            box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
+                                       JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
+                            cached_render_boxes.append((box, sandstone_style))
+                            sandstone_count += 1
+
+                        elif block == Blocks.SNOW or block == Blocks.SNOW_BLOCK:
+                            box = AABB(JavaFloat(x), JavaFloat(y), JavaFloat(z),
+                                       JavaFloat(x + 1.0), JavaFloat(y + 1.0), JavaFloat(z + 1.0))
+                            cached_render_boxes.append((box, snow_style))
+                            snow_count += 1
+
+                    blocks_scanned_this_tick += 1
+
+                    if blocks_scanned_this_tick >= blocks_per_tick:
+                        yield False
+                        blocks_scanned_this_tick = 0
+
+    total_count = red_terracotta_count + sandstone_count + snow_count
+    echo(f"§a§l[RADAR] §rScan complete! Found {total_count} total blocks.")
+    echo(f"§c█§r: Red Terracotta ({red_terracotta_count})")
+    echo(f"§e█§r: Sandstone ({sandstone_count})")
+    echo(f"§f█§r: Snow ({snow_count})")
+    yield True
+
+
+def start_scan(event):
+    """Press Mouse Button 4 to trigger the scan."""
+    global scan_finished, scanner_instance, cached_render_boxes
+
+    if event.button == 3 and event.action == 1:
+        if mc.player is not None:
+            cached_render_boxes.clear()
+            ppos = mc.player.position()
+            scanner_instance = background_block_scanner(int(ppos.x), int(ppos.z))
+            scan_finished = False
+
+
+def on_tick(event):
+    global scan_finished
+    if not scan_finished and scanner_instance is not None:
+        try:
+            if next(scanner_instance) == True:
+                scan_finished = True
+        except StopIteration:
+            scan_finished = True
+
+
+def on_render(event):
+    for box, style in cached_render_boxes:
+        try:
+            Gizmos.cuboid(box, style).setAlwaysOnTop()
+        except:
+            pass
+
+
+add_event_listener("tick", on_tick)
+add_event_listener("render", on_render)
+add_event_listener("mouse", start_scan)
+
+m.echo("§e[RADAR Ready] Click Mouse Button 4 to scan for Red Terracotta, Sandstone, and Snow.")
