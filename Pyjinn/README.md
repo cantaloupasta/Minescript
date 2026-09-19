@@ -18,3 +18,9 @@
 ### Corleone finder
 * Searches for cyan terracotta, ladders and spruce planks that are in close proximity
 * Can only scans for blocks in your render distance (8 chunks) in mithril deposits
+
+# [Dragon](dragon.pyj)
+### Dragon's Lair/Golden Egg finder
+* Searches for red terracotta, snow blocks and sandstone
+* If there's sandstone blocks or snow blocks present its probably the dragon's lair
+* Red Terracotta is a red herring because it is used in the Mines of Divan but good for spotting dragon
