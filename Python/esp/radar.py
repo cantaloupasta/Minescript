@@ -37,6 +37,7 @@ class RadarConfigApp(tk.Tk):
 
         self.mob_db = mob_db
         self.mob_names = sorted(mob_db.keys())
+        self.mob_names_lower = {name.lower(): name for name in mob_db}
         self.entries = []
         self.selected_color = (0, 240, 255)
         self.editing_index = None
@@ -140,11 +141,13 @@ class RadarConfigApp(tk.Tk):
         return "#{:02x}{:02x}{:02x}".format(*rgb)
 
     def _save_entry(self):
-        mob_type = self.mob_type_var.get().strip()
+        typed_mob_type = self.mob_type_var.get().strip()
         name = self.name_var.get().strip()
 
-        if mob_type not in self.mob_db:
-            messagebox.showerror("Invalid mob type", f"'{mob_type}' was not found in mob_db.json.")
+        mob_type = self.mob_names_lower.get(typed_mob_type.lower())
+
+        if mob_type is None:
+            messagebox.showerror("Invalid mob type", f"'{typed_mob_type}' was not found in mob_db.json.")
             return
         if not name:
             messagebox.showerror("Missing name", "Please choose a display name for this entry.")
