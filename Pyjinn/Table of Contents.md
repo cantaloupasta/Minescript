@@ -4,11 +4,6 @@
 * Searches for 1x1 lava blocks valid for worm fishing, rendered in blue.
 * Can only scans for lava in your render distance (8 chunks) in precursor remnants
 
-# [ESP](esp.pyj)
-### Shulker/Turtle/Armadillo/Creeper ESP
-* Highlights Shulker position in blue/Turtles and Creepers in green/Armadillos in pink
-* Rendering updates dynamically
-
 # [Beehive](beehive.pyj)
 ### Beehive + trapdoor on top scanner w/ waypoints
 * Highlights the position of the Honey Hives in the Torrhus Canyon
