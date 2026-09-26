@@ -1,4 +1,4 @@
-# [Fishing script v1](Minescript/Python/fish.py)
+# [Fishing script v1](Minescript/Python/fish/fish.py)
 Prototype of a multifishing bot for Skyblock (Disclaimer: some of the script is vibe coded)
 
 Even has a sort of app to change settings and stuff!
@@ -26,6 +26,13 @@ Resets the bobber when stuck
 5. Select the correct mode of fishing
 6. Tweak the constants (they have been tuned to my stats)
 7. Start fishin, and always keep an eye on it
+
+## Manual Pet Swap (which isnt really manual..)
+* Select a slot 1-28
+* You can only select pets that are in the first page, so favorite them if needed
+* Here is how the slot numbers work:
+<img width="259" height="327" alt="image" src="https://github.com/user-attachments/assets/60f88302-c2b8-4698-bae6-825d8df1a710" />
+
 
 ## Default
 * Basic fishing
