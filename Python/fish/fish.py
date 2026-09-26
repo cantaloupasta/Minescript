@@ -14,6 +14,11 @@ after.
 "Saved orientation" = yaw/pitch captured once at fishing_loop start; used as
 the return point after interrupts and as the front/back reference for totem
 placement (relative to saved yaw, not live yaw).
+
+Pet swap (toggle): after every rod cast, opens the /pets container, drops
+(throws) a configured chest slot. The UI takes a friendly slot number (1-28) matching
+what's shown on screen; it's translated internally to the real, 0-indexed
+container slot lib_inv expects. Anything outside 1-28 is rejected at start.
 """
 
 import time
@@ -30,6 +35,7 @@ from system.lib.java import JavaClass
 from threading import Thread, Lock
 from system.lib.minescript import EventType, EventQueue
 from eventlib import *  # must be imported before any EventQueue() is instantiated
+import lib_inv as inv  # container manipulation (pickup/quickmove/swap/throw/open/close/get_item)
 
 events = EventQueue()
 _Minecraft = JavaClass("net.minecraft.client.Minecraft")
@@ -331,6 +337,31 @@ MODES_ALLOWING_TOTEM = ("Default", "Magma", "Worm", "Strider", "Trophy")
 MODES_WITH_CLEARING = ("Magma", "Worm", "Strider")
 
 # ==============================================================================
+# Pet swap (container manipulation via lib_inv)
+# ==============================================================================
+# 11-17 / 20-26 / 29-35 / 38-44 are the /pets container's usable rows as a
+# person would count them looking at the screen (1-indexed, with gaps for
+# other UI elements in the container). lib_inv's throw() ultimately clicks a
+# slot in mc.player.containerMenu.slots, which is a plain 0-indexed Python/
+# Java list, so the actual API call needs each of those numbers minus 1.
+pet_swap_HUMAN_SLOT_RANGES = ((11, 17), (20, 26), (29, 35), (38, 44))
+
+pet_swap_RAW_SLOTS = []
+for _lo, _hi in pet_swap_HUMAN_SLOT_RANGES:
+    for _human_slot in range(_lo, _hi + 1):
+        pet_swap_RAW_SLOTS.append(_human_slot - 1)  # 0-indexed slot lib_inv.throw() expects
+
+# The UI shows a single contiguous "friendly" slot number (1-28) instead of
+# making the person remember the gapped 11-17/20-26/29-35/38-44 ranges.
+# Friendly 1-7 -> raw 10-16, 8-14 -> raw 19-25, 15-21 -> raw 28-34,
+# 22-28 -> raw 37-43.
+pet_swap_FRIENDLY_TO_RAW = {i + 1: raw for i, raw in enumerate(pet_swap_RAW_SLOTS)}
+pet_swap_MIN_SLOT = 1
+pet_swap_MAX_SLOT = len(pet_swap_FRIENDLY_TO_RAW)  # 28
+
+pet_swap_GUI_WAIT_SECONDS = 0.5  # time to let the /pets container open before interacting with it
+
+# ==============================================================================
 # RUNTIME STATE
 # ==============================================================================
 running = False
@@ -445,11 +476,31 @@ def press_attack():
     m.player_press_attack(False)
 
 
+def pet_swap_cycle():
+    try:
+        friendly_slot = int(var_pet_swap_slot.get())
+    except ValueError:
+        m.echo("[!] Pet swap slot is invalid; skipping this cycle.")
+        return
+    raw_slot = pet_swap_FRIENDLY_TO_RAW.get(friendly_slot)
+    if raw_slot is None:
+        m.echo(f"[!] Pet swap slot out of allowed range (1-{pet_swap_MAX_SLOT}); skipping this cycle.")
+        return
+    try:
+        m.execute("/pets")
+        time.sleep(pet_swap_GUI_WAIT_SECONDS)
+        inv.throw(raw_slot)
+    except Exception as ex:
+        m.echo(f"[!] Pet swap cycle failed: {ex}")
+
+
 def use_rod(cast=False):
     select_slot(real_slot(var_slot_rod))
     if cast:
         wait_until_airborne()
     press_use()
+    if cast and var_pet_swap.get():
+        pet_swap_cycle()
 
 
 def breathe():
@@ -955,6 +1006,15 @@ def validate_slots():
         return False, "Slots must be whole numbers."
     if len({rod, melee, ranged, totem}) != 4:
         return False, "Rod, melee, ranged, and totem slots must all be different."
+
+    if var_pet_swap.get():
+        try:
+            pet_slot = int(var_pet_swap_slot.get())
+        except ValueError:
+            return False, "Pet swap slot must be a whole number."
+        if pet_slot not in pet_swap_FRIENDLY_TO_RAW:
+            return False, f"Pet swap slot must be between {pet_swap_MIN_SLOT} and {pet_swap_MAX_SLOT}."
+
     return True, ""
 
 
@@ -985,7 +1045,6 @@ def update_button_ui():
 
 root = tk.Tk()
 root.title("Unified Fishing Bot")
-root.geometry("330x650")
 root.attributes("-topmost", True)
 
 var_mode = tk.StringVar(value="Default")
@@ -1001,6 +1060,8 @@ var_slot_rod = tk.StringVar(value="1")
 var_slot_ranged = tk.StringVar(value="2")
 var_slot_totem = tk.StringVar(value="3")
 var_slot_melee = tk.StringVar(value="4")
+var_pet_swap = tk.BooleanVar(value=False)
+var_pet_swap_slot = tk.StringVar(value="1")
 
 tk.Label(root, text="Fishing Mode", font=("Arial", 10, "bold")).pack(pady=(10, 2))
 frame_mode = tk.LabelFrame(root, text="Mode (select one)")
@@ -1043,16 +1104,25 @@ frame_totem.pack(fill="x", padx=10, pady=5)
 chk_totem = tk.Checkbutton(frame_totem, text="Enable deployable placement", variable=var_totem)
 chk_totem.pack(anchor="w")
 
-frame_const = tk.LabelFrame(root, text="Configurable Constants")
-frame_const.pack(fill="x", padx=10, pady=5)
-
-
+# 1. Define the helper function FIRST so both sections can use it
 def labeled_entry(parent, label, var):
     row = tk.Frame(parent)
     row.pack(fill="x", pady=2)
     tk.Entry(row, textvariable=var, width=5).pack(side="left")
     tk.Label(row, text=label, anchor="w", justify="left", wraplength=200).pack(side="left", padx=(6, 0))
 
+# 2. MOVED SECTION: Pet swap goes here (Below Deployable, Above Constants)
+frame_pet_swap = tk.LabelFrame(root, text="Pet swap")
+frame_pet_swap.pack(fill="x", padx=10, pady=5)
+chk_pet_swap = tk.Checkbutton(
+    frame_pet_swap, text="Enable Pet swap)", variable=var_pet_swap
+)
+chk_pet_swap.pack(anchor="w")
+labeled_entry(frame_pet_swap, f"Pet slot (1-{pet_swap_MAX_SLOT})", var_pet_swap_slot)
+
+# 3. Configurable Constants section follows after
+frame_const = tk.LabelFrame(root, text="Configurable Constants")
+frame_const.pack(fill="x", padx=10, pady=5)
 
 labeled_entry(frame_const, "Apnea time (s)", var_apnea)
 labeled_entry(frame_const, "Entity/Bobber Detect distance (m)", var_detect_distance)
@@ -1064,13 +1134,6 @@ labeled_entry(frame_const, "Ranged slot", var_slot_ranged)
 labeled_entry(frame_const, "Deployable slot", var_slot_totem)
 labeled_entry(frame_const, "Melee slot", var_slot_melee)
 
-tk.Label(
-    root,
-    text="(Deployable reach range and NPC exclusion are both fixed at 5 blocks)",
-    font=("Arial", 8, "italic"),
-    wraplength=290,
-).pack(pady=(2, 0))
-
 lbl_error = tk.Label(root, text="", fg="red", wraplength=290)
 lbl_error.pack(pady=(4, 0))
 
@@ -1079,6 +1142,16 @@ btn = tk.Button(
     bg="green", fg="white", font=("Arial", 10, "bold"),
 )
 btn.pack(pady=12)
+
+# Size the window to whatever it actually takes to show every widget
+# (including the Start/Stop button) instead of a hardcoded guess that goes
+# stale whenever a section is added -- then lock that as the minimum size so
+# the button can't be resized out of view.
+root.update_idletasks()
+_req_w = root.winfo_reqwidth()
+_req_h = root.winfo_reqheight()
+root.geometry(f"{_req_w}x{_req_h}")
+root.minsize(_req_w, _req_h)
 
 Thread(target=chat_listener_worker, daemon=True).start()
 Thread(target=mouse_listener_worker, daemon=True).start()
