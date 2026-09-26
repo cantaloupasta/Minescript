@@ -3,7 +3,7 @@ Prototype of a multifishing bot for Skyblock (Disclaimer: some of the script is 
 
 Even has a sort of app to change settings and stuff!
 
-### NEEDS [EVENTLIB](https://github.com/SmartBoty/Minescript/tree/main/eventlib) TO WORK
+### NEEDS [EVENTLIB](https://github.com/SmartBoty/Minescript/tree/main/eventlib) AND [LIB INV](https://github.com/SmartBoty/Minescript/blob/main/lib_inv/lib_inv.py) TO WORK
 ### Modes
 * Default
 * Treasure
