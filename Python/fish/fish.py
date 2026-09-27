@@ -359,7 +359,7 @@ pet_swap_FRIENDLY_TO_RAW = {i + 1: raw for i, raw in enumerate(pet_swap_RAW_SLOT
 pet_swap_MIN_SLOT = 1
 pet_swap_MAX_SLOT = len(pet_swap_FRIENDLY_TO_RAW)  # 28
 
-pet_swap_GUI_WAIT_SECONDS = 0.5  # time to let the /pets container open before interacting with it
+pet_swap_GUI_WAIT_SECONDS = 0.2  # time to let the /pets container open before interacting with it
 
 # ==============================================================================
 # RUNTIME STATE
@@ -476,7 +476,18 @@ def press_attack():
     m.player_press_attack(False)
 
 
+pet_swap_lock = Lock()
+pet_swap_busy = False
+
+
 def pet_swap_cycle():
+    """Opens /pets and throws the configured slot (the throw itself closes
+    the container, so no explicit close is needed). Runs on its own thread
+    (see start_pet_swap_cycle) instead of inline in use_rod() -- previously
+    the whole open/sleep/throw sequence blocked fishing_loop's main thread,
+    so an instant bite during that ~0.5s+ window was never scanned for at
+    all until the next pass."""
+    global pet_swap_busy
     try:
         friendly_slot = int(var_pet_swap_slot.get())
     except ValueError:
@@ -486,21 +497,54 @@ def pet_swap_cycle():
     if raw_slot is None:
         m.echo(f"[!] Pet swap slot out of allowed range (1-{pet_swap_MAX_SLOT}); skipping this cycle.")
         return
+
+    if not pet_swap_lock.acquire(blocking=False):
+        # A previous swap is still running (e.g. two very fast bites back
+        # to back) -- skip rather than stacking a second /pets open on top.
+        m.echo("[*] Pet swap already in progress; skipping this cycle.")
+        return
+
+    pet_swap_busy = True
     try:
         m.execute("/pets")
         time.sleep(pet_swap_GUI_WAIT_SECONDS)
         inv.throw(raw_slot)
     except Exception as ex:
         m.echo(f"[!] Pet swap cycle failed: {ex}")
+    finally:
+        pet_swap_busy = False
+        pet_swap_lock.release()
+
+
+def start_pet_swap_cycle():
+    """Fires pet_swap_cycle() on a daemon thread so casting stays instant
+    and fishing_loop's bite scan keeps running while the swap happens."""
+    Thread(target=pet_swap_cycle, daemon=True).start()
+
+
+def ensure_pet_swap_clear(max_wait=1.5):
+    """Briefly waits for an in-flight pet swap to finish before a real
+    reel/cast press_use() fires. The throw itself closes /pets, but there's
+    still a window between m.execute("/pets") and the throw where the
+    container is open -- a press_use() landing in that window would hit
+    the GUI instead of the rod. This is a no-op unless a swap happens to
+    be in progress, so it adds no delay in the common case."""
+    if not pet_swap_busy:
+        return
+    start = time.time()
+    while pet_swap_busy and time.time() - start < max_wait:
+        time.sleep(0.02)
 
 
 def use_rod(cast=False):
+    if var_pet_swap.get():
+        ensure_pet_swap_clear()
     select_slot(real_slot(var_slot_rod))
     if cast:
         wait_until_airborne()
     press_use()
     if cast and var_pet_swap.get():
-        pet_swap_cycle()
+        start_pet_swap_cycle()
 
 
 def breathe():
