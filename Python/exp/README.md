@@ -1,6 +1,7 @@
 # [Experimentation Table Script](Minescript/Python/exp/exp.py)
 ### Fully autonomous
 ## How to use
+- REQUIRES [LIB_INV](https://github.com/SmartBoty/Minescript/tree/main/lib_inv)
 - Equip a Guardian Pet and enable pet visibility
 - Have a couple million coins in your purse if you are missing XP Levels
 - Start the script by looking at the experimentation table (must be in reach)
