@@ -32,6 +32,8 @@ COLOR_RE = re.compile(r"(?:minecraft:)?(\w+?)_(stained_glass|terracotta)$")
 XP_COST_RE = re.compile(r"Starting cost:\s*(\d+)\s*XP Levels?", re.IGNORECASE)
 XP_LEVELS_RE = re.compile(r"(\d[\d,]*)\s*XP Levels?", re.IGNORECASE)
 EXP_RE = re.compile(r"\b\d+\s*k\b", re.IGNORECASE)
+# Enchant levels III / IV at the end of a name (VIII etc. do not match)
+LOW_LEVEL_RE = re.compile(r"\b(?:III|IV)$", re.IGNORECASE)
 
 XP_SHOP_SLOT = 50
 XP_BUY_SLOT = 14
@@ -50,14 +52,13 @@ HIGH_VALUE_ORDER = [
     "Nadeshiko Dye", "Looting V", "Critical VII", "Sharpness VI", "Giant Killer VII",
     "Prosecute VI", "Power VII", "First Strike V", "Cubism VI", "Protection VII",
     "Growth VII", "Snipe IV", "End Stone Idol", "Execute VI", "Golden Bounty",
-    "Luck VII", "Triple-Strike V", "Lifesteal V", "Cleave VI", "Chance V",
+    "Luck VII", "Triple-Strike V", "Life Steal V", "Cleave VI", "Chance V",
     "Drain V", "Gold Bottle Cap", "Severed Hand", "Titan Killer VII", "Troubled Bubble",
     "Thunderlord VII", "Gravity VI", "Octopus Tendril", "Fateful Stinger", "Vibrant Coral",
     "Projectile Protection VII", "Severed Pincer", "A Beginner's Guide to Pesthunting",
     "Protection VI", "Growth VI", "Fire Protection VII", "Chain of the End Times",
     "Thunderbolt VII", "Ensnared Snail", "Blast Protection VII",
 ]
-HIGH_VALUE_ALIASES = {"snip iv": "snipe iv", "life steal v": "lifesteal v"}
 HIGH_VALUE_RANK = {name.lower(): i for i, name in enumerate(HIGH_VALUE_ORDER)}
 HIGH_VALUE = set(HIGH_VALUE_RANK)
 NOT_RANKED = len(HIGH_VALUE_ORDER)
@@ -67,7 +68,7 @@ LOW_VALUE = {s.lower() for s in [
     "Giant Killer VI", "Ender Slayer VI", "Metaphysical Serum", "Drain IV",
     "Respite III", "Chance IV", "Power VI", "Fire Protection VI",
     "Blast Protection VI", "Woodsplitter VI", "Titan Killer VI", "Thunderbolt VI",
-    "Projectile Protection VI", "Experiment the Fish", "Guardian",
+    "Projectile Protection VI", "Experiment the Fish","Grand Experience Bottle", "Experience Bottle",
 ]}
 
 TIER_HIGH, TIER_EXP, TIER_OTHER, TIER_LOW = 0, 1, 2, 3
@@ -433,7 +434,14 @@ def tile_name(item):
     if not item:
         return ""
     comps = item.get('components', {})
-    return text_of(comps.get('minecraft:custom_name') or item.get('name')).strip()
+    name = text_of(comps.get('minecraft:custom_name') or item.get('name')).strip()
+    # Enchanted books are all named "Enchanted Book"; the real enchant is in the lore
+    if item_id(item).endswith("enchanted_book") or name.lower() == "enchanted book":
+        for line in get_lore(item):
+            txt = strip_color(text_of(line)).strip()
+            if txt and txt.lower() != "combinable in anvil":
+                return txt
+    return name
 
 
 def tile_kind(item):
@@ -459,15 +467,14 @@ def tile_key(item):
 
 
 def norm_name(name):
-    n = strip_color(name).strip().lower()
-    return HIGH_VALUE_ALIASES.get(n, n)
+    return strip_color(name).strip().lower()
 
 
 def tier_of_name(name):
     n = norm_name(name)
     if n in HIGH_VALUE:
         return TIER_HIGH
-    if n in LOW_VALUE:
+    if "guardian" in n or n in LOW_VALUE or LOW_LEVEL_RE.search(n):
         return TIER_LOW
     if EXP_RE.search(n):
         return TIER_EXP
