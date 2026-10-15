@@ -32,6 +32,8 @@ COLOR_RE = re.compile(r"(?:minecraft:)?(\w+?)_(stained_glass|terracotta)$")
 XP_COST_RE = re.compile(r"Starting cost:\s*(\d+)\s*XP Levels?", re.IGNORECASE)
 XP_LEVELS_RE = re.compile(r"(\d[\d,]*)\s*XP Levels?", re.IGNORECASE)
 EXP_RE = re.compile(r"\b\d+\s*k\b", re.IGNORECASE)
+XP_BLOCK_RE = re.compile(r"\+\s*([\d,]+)\s*XP\b", re.IGNORECASE)   # lapis block: "+124,082 XP"
+ENCHANT_RE = re.compile(r"^[A-Za-z' -]+ (?:[IVX]+|\d+)$")
 # Enchant levels III / IV at the end of a name (VIII etc. do not match)
 LOW_LEVEL_RE = re.compile(r"\b(?:III|IV)$", re.IGNORECASE)
 
@@ -44,8 +46,12 @@ XP_UPDATE_TIMEOUT = 3.0
 PAIRS_BOARD = [row * 9 + col for row in (1, 2, 3, 4) for col in range(1, 8)]
 PAIRS_CLICKS_SLOT = 4
 PAIRS_TIMEOUT = 3.0
+PAIRS_FLIP_TIMEOUT = 1.5  # max time to wait for mismatched tiles to flip back (never treated as matched)
 PAIRS_DELAY = 0.25
 PAIRS_POLL = 0.03
+PAIRS_START_RATIO = 0.5   # Start matching pairs once clicks left <= initial clicks * this
+PAIRS_EARLY_HIGH = False  # True = also pair known high value tiles before the halfway point
+PAIRS_DEBUG = True        # Print the key/tier of every revealed tile
 
 # High-value item ranking setup
 HIGH_VALUE_ORDER = [
@@ -71,7 +77,7 @@ LOW_VALUE = {s.lower() for s in [
     "Projectile Protection VI", "Experiment the Fish","Grand Experience Bottle", "Experience Bottle",
 ]}
 
-TIER_HIGH, TIER_EXP, TIER_OTHER, TIER_LOW = 0, 1, 2, 3
+TIER_HIGH, TIER_EXP, TIER_LOW, TIER_OTHER = 1, 2, 3, 4   # 4 = unclassified (still pairable, lowest priority)
 GUARDIAN_PROFILE_ID = "f4c2cad70ace4ce6867869d0b653a98b"
 GUARDIAN_TEXTURE_HASH = "221025434045bda7025b3e514b316a4b770c6faa4ba9adb4be3809526db77f9d"
 
@@ -97,6 +103,18 @@ def item_id(item):
     if not item:
         return ""
     return item.get('item') or item.get('id') or ""
+
+
+AIR_RE = re.compile(r"(?:^|:)(?:void_|cave_)?air$")
+
+
+def is_empty(item):
+    """True for empty slots / minecraft:air (shown briefly while a tile flips)."""
+    if not item:
+        return True
+    if AIR_RE.search(item_id(item)):
+        return True
+    return item.get('count', 1) == 0
 
 
 def color_of(item):
@@ -434,7 +452,21 @@ def tile_name(item):
     if not item:
         return ""
     comps = item.get('components', {})
-    name = text_of(comps.get('minecraft:custom_name') or item.get('name')).strip()
+    name = ""
+    for raw in (comps.get('minecraft:custom_name'), comps.get('minecraft:item_name'), item.get('name')):
+        name = strip_color(text_of(raw)).strip()
+        if name:
+            break
+    # "Rare Book!" heads: the real enchant is in the lore, e.g. "Growth VI Grants +90 Health."
+    # Lore lines contain extra text, so search the whole lore for a known enchant (longest name first).
+    if name.lower().rstrip("! ") == "rare book":
+        joined = " ".join(strip_color(text_of(l)).strip() for l in get_lore(item)).lower()
+        for known_name in sorted(HIGH_VALUE | LOW_VALUE, key=len, reverse=True):
+            if re.search(r"(?<![\w])" + re.escape(known_name) + r"(?![\w])", joined):
+                return known_name
+        for line in (strip_color(text_of(l)).strip() for l in get_lore(item)):
+            if ENCHANT_RE.match(line):
+                return line
     # Enchanted books are all named "Enchanted Book"; the real enchant is in the lore
     if item_id(item).endswith("enchanted_book") or name.lower() == "enchanted book":
         for line in get_lore(item):
@@ -446,7 +478,9 @@ def tile_name(item):
 
 def tile_kind(item):
     iid = item_id(item)
-    if not item or "glass" in iid:
+    if is_empty(item):
+        return "empty"      # air: tile is mid-flip, NOT a revealed item
+    if "glass" in iid:
         return "hidden"
     name = tile_name(item).lower()
     if "instant find" in name:
@@ -458,6 +492,8 @@ def tile_kind(item):
 
 def tile_key(item):
     key = item_id(item) + "|" + tile_name(item)
+    if tile_name(item).lower().rstrip("! ") == "rare book":
+        key += "|" + lore_text(item)   # unidentified: don't let different books look equal
     if not EXP_RE.search(tile_name(item)):
         lore = " ".join(text_of(line) for line in get_lore(item))
         found = EXP_RE.search(lore)
@@ -476,7 +512,7 @@ def tier_of_name(name):
         return TIER_HIGH
     if "guardian" in n or n in LOW_VALUE or LOW_LEVEL_RE.search(n):
         return TIER_LOW
-    if EXP_RE.search(n):
+    if EXP_RE.search(n) or XP_BLOCK_RE.search(n):
         return TIER_EXP
     return TIER_OTHER
 
@@ -484,7 +520,7 @@ def tier_of_name(name):
 def tier_of_key(key):
     rest = key.split("|", 1)[1] if "|" in key else key
     tier = tier_of_name(rest.split("|")[0])
-    if tier == TIER_OTHER and EXP_RE.search(rest):
+    if tier == TIER_OTHER and (EXP_RE.search(rest) or XP_BLOCK_RE.search(rest)):
         return TIER_EXP
     return tier
 
@@ -495,7 +531,7 @@ def rank_of_key(key):
 
 
 def revealed_set(curr):
-    return {s for s in PAIRS_BOARD if s < len(curr) and tile_kind(curr[s]) != "hidden"}
+    return {s for s in PAIRS_BOARD if s < len(curr) and tile_kind(curr[s]) not in ("hidden", "empty")}
 
 
 def wait_reveal(slot):
@@ -504,14 +540,15 @@ def wait_reveal(slot):
         curr = inv.inventory()
         if len(curr) <= PAIRS_BOARD[-1]:
             return None
-        if tile_kind(curr[slot]) != "hidden":
+        if tile_kind(curr[slot]) not in ("hidden", "empty"):
             return curr[slot]
         time.sleep(PAIRS_POLL)
     return None
 
 
-def wait_hidden(slots):
-    end = time.time() + PAIRS_TIMEOUT + 2
+def wait_hidden(slots, timeout=None):
+    end = time.time() + (PAIRS_FLIP_TIMEOUT if timeout is None else timeout)
+    curr = []
     while time.time() < end:
         curr = inv.inventory()
         if len(curr) <= PAIRS_BOARD[-1]:
@@ -533,25 +570,37 @@ def settle():
         time.sleep(0.05)
 
 
-def find_known_pair(known):
+def find_known_pair(known, high_only=False):
     by_key = {}
     for slot, key in known.items():
         by_key.setdefault(key, []).append(slot)
     best = None
     for key, slots in by_key.items():
         t = tier_of_key(key)
-        score = (t, rank_of_key(key))
-        if len(slots) >= 2 and t != TIER_LOW and (best is None or score < best[0]):
+        if len(slots) < 2 or t == TIER_LOW:
+            continue
+        if high_only and t != TIER_HIGH:
+            continue
+        # high value by rank, then exp from highest to lowest
+        score = (t, rank_of_key(key), -exp_amount(key))
+        if best is None or score < best[0]:
             best = (score, slots[0], slots[1])
     return (best[1], best[2]) if best else None
 
 
-def remember(known, slot, key):
-    if tier_of_key(key) != TIER_LOW:
+def remember(known, ignored, slot, key):
+    if key.split("|", 1)[0] in ("", "minecraft:air", "air"):
+        return  # never remember air
+    if tier_of_key(key) == TIER_LOW:
+        ignored.add(slot)       # seen it, don't waste clicks on it again
+    else:
         known[slot] = key
 
 
 def exp_amount(key):
+    block = XP_BLOCK_RE.search(key)
+    if block:
+        return int(block.group(1).replace(",", "")) // 1000
     found = EXP_RE.search(key)
     return int(re.search(r"\d+", found.group(0)).group()) if found else 0
 
@@ -569,7 +618,12 @@ def best_instant_target(known):
 
 
 def pairs_game():
-    known, done = {}, set()
+    print("[pairs v3] started")
+    known = {}      # slot -> key of tiles we've seen and want to pair
+    ignored = set() # low value tiles (never click again)
+    done = set()    # tiles confirmed matched / consumed (only set explicitly, never guessed)
+    initial_clicks, pairing = None, False
+    idle = 0
 
     while True:
         curr = inv.inventory()
@@ -582,30 +636,51 @@ def pairs_game():
             print("No clicks left, stopping")
             return
 
-        revealed = revealed_set(curr)
-        done |= revealed
-        for s in revealed:
-            known.pop(s, None)
+        clicks = shelf.get('count', 0)
+        if initial_clicks is None:
+            initial_clicks = clicks
+        if not pairing and clicks <= initial_clicks * PAIRS_START_RATIO:
+            pairing = True
+            print(f"Clicks {clicks}/{initial_clicks}: switching to pairing mode")
 
-        remaining = [s for s in PAIRS_BOARD if s not in done]
-        if not remaining:
+        hidden = {sl for sl in PAIRS_BOARD if sl not in done and tile_kind(curr[sl]) == "hidden"}
+        live = {sl: k for sl, k in known.items() if sl not in done}  # tile may still be flipping back; we wait before clicking
+        unknown = [sl for sl in PAIRS_BOARD if sl in hidden and sl not in known and sl not in ignored]
+
+        if not hidden and not any(sl not in done and tile_kind(curr[sl]) != "empty" for sl in PAIRS_BOARD):
             print("Board cleared")
             return
-        unknown = [s for s in remaining if s not in known]
 
-        pair = find_known_pair(known)
+        # Explore first; once past the halfway point pair known tiles (high value first, then exp highest to lowest).
+        pair = find_known_pair(live, high_only=not pairing) if (pairing or PAIRS_EARLY_HIGH) else None
         if pair:
             a, b = pair
+            print(f"Pairing known tiles {a} + {b}: {known.get(a)}")
+            wait_hidden([a, b], 4.0)   # make sure both are glass again before clicking
             inv.throw(a)
             wait_reveal(a)
             time.sleep(PAIRS_DELAY)
             inv.throw(b)
             wait_reveal(b)
+            known.pop(a, None)
+            known.pop(b, None)
+            done.update((a, b))
             settle()
+            idle = 0
             continue
 
         if not unknown:
+            if not pairing:
+                pairing = True
+                continue
+            # Some known tiles may not have flipped back yet; give them a moment
+            if idle < 25 and any(sl in known and sl not in done for sl in PAIRS_BOARD):
+                idle += 1
+                time.sleep(0.2)
+                continue
+            print("No more useful tiles, stopping")
             return
+        idle = 0
 
         a = unknown[0]
         inv.throw(a)
@@ -616,31 +691,42 @@ def pairs_game():
 
         kind_a, key_a = tile_kind(item_a), tile_key(item_a)
         t_a = tier_of_key(key_a)
-        others = [s for s in unknown if s != a]
+        if PAIRS_DEBUG:
+            print(f"Slot {a}: kind={kind_a} tier={t_a} key={key_a}")
+        others = [sl for sl in unknown if sl != a] or [sl for sl in live if sl != a]
 
         if kind_a == "bonus":
+            done.add(a)
             settle()
             continue
 
         if kind_a == "instant":
-            target = best_instant_target(known) or (others[0] if others else None)
+            done.add(a)
+            target = (best_instant_target(live) if pairing else None) or (others[0] if others else None)
             if target is not None:
                 time.sleep(PAIRS_DELAY)
                 inv.throw(target)
+                known.pop(target, None)
+                done.add(target)
             settle()
             continue
 
-        if t_a != TIER_LOW:
-            partner = next((s for s, k in known.items() if k == key_a), None)
+        # Known partner for this tile? Always take it for high value tiles, otherwise only in pairing mode
+        if (pairing or (PAIRS_EARLY_HIGH and t_a == TIER_HIGH)) and t_a != TIER_LOW:
+            partner = next((sl for sl, k in live.items() if k == key_a and sl != a), None)
             if partner is not None:
+                print(f"Matching slot {a} with known slot {partner}: {key_a}")
+                wait_hidden([partner], 4.0)
                 time.sleep(PAIRS_DELAY)
                 inv.throw(partner)
                 wait_reveal(partner)
+                known.pop(partner, None)
+                done.update((a, partner))
                 settle()
                 continue
 
         if not others:
-            remember(known, a, key_a)
+            remember(known, ignored, a, key_a)
             continue
 
         b = others[0]
@@ -648,20 +734,27 @@ def pairs_game():
         inv.throw(b)
         item_b = wait_reveal(b)
         if item_b is None:
-            remember(known, a, key_a)
+            remember(known, ignored, a, key_a)
             continue
 
         if tile_kind(item_b) != "normal":
-            remember(known, a, key_a)
+            remember(known, ignored, a, key_a)
+            if tile_kind(item_b) in ("bonus", "instant"):
+                done.add(b)
             settle()
             continue
 
         key_b = tile_key(item_b)
+        if PAIRS_DEBUG:
+            print(f"Slot {b}: tier={tier_of_key(key_b)} key={key_b}")
         if key_a == key_b:
+            known.pop(a, None)
+            known.pop(b, None)
+            done.update((a, b))
             settle()
         else:
-            remember(known, a, key_a)
-            remember(known, b, key_b)
+            remember(known, ignored, a, key_a)
+            remember(known, ignored, b, key_b)
             wait_hidden([a, b])
 
 
