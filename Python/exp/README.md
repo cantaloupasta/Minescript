@@ -6,7 +6,9 @@
 - Have a couple million coins in your purse if you are missing XP Levels
 - Start the script by looking at the experimentation table (must be in reach)
 - On line 10, there is the variable "spend_bits" which is "True" by default, set to "False" if you want it off
-<img width="607" height="212" alt="image" src="https://github.com/user-attachments/assets/21caa63d-60c7-4b4d-911a-3d817773740f" />
+- On line 11, there is the variable "is_serum" (means that you have consumed 3 metaphysical serums) which is "True" by default, set to "False" if you want it off.
+<img width="932" height="92" alt="image" src="https://github.com/user-attachments/assets/1de7bf8c-4574-492a-9c00-fb88476e8055" />
+
 
 ## Features
 - Plays the add-ons and super pair
