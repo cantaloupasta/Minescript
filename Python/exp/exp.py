@@ -9,6 +9,7 @@ import functools
 
 # --- Settings ---------------------------------------------------------------
 spend_bits = True         # True = spend bits to recharge, False to turn off
+is_serum = True           # True = cap rounds (Chroma 9, Ultra 4), False = normal caps
 
 chroma_slot = 29
 pairs_slot = 22
@@ -854,7 +855,7 @@ def main():
             time.sleep(0.5)
             selected_slot = pick_from_menu(*CHROMA_RANGE)
             if selected_slot is not None:
-                chroma_game(13 if selected_slot == 24 else 10)
+                chroma_game(9 if is_serum else (13 if selected_slot == 24 else 10))
                 time.sleep(1)
                 continue
 
@@ -863,7 +864,7 @@ def main():
             time.sleep(0.5)
             selected_slot = pick_from_menu(*ULTRA_RANGE)
             if selected_slot is not None:
-                ultra_game(8 if selected_slot == 23 else 6)
+                ultra_game(4 if is_serum else (8 if selected_slot == 23 else 6))
                 time.sleep(1)
                 continue
 
