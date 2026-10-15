@@ -5,6 +5,7 @@ import sys
 import time
 import base64
 import json
+import functools
 
 # --- Settings ---------------------------------------------------------------
 spend_bits = True         # True = spend bits to recharge, False to turn off
@@ -47,8 +48,9 @@ PAIRS_BOARD = [row * 9 + col for row in (1, 2, 3, 4) for col in range(1, 8)]
 PAIRS_CLICKS_SLOT = 4
 PAIRS_TIMEOUT = 3.0
 PAIRS_FLIP_TIMEOUT = 1.5  # max time to wait for mismatched tiles to flip back (never treated as matched)
-PAIRS_DELAY = 0.25
+PAIRS_DELAY = 0.12        # gap between the two clicks of a pair (was 0.25)
 PAIRS_POLL = 0.03
+SETTLE_STABLE = 4         # identical reads needed in settle() (was 8)
 PAIRS_START_RATIO = 0.5   # Start matching pairs once clicks left <= initial clicks * this
 PAIRS_EARLY_HIGH = False  # True = also pair known high value tiles before the halfway point
 PAIRS_DEBUG = True        # Print the key/tier of every revealed tile
@@ -76,6 +78,12 @@ LOW_VALUE = {s.lower() for s in [
     "Blast Protection VI", "Woodsplitter VI", "Titan Killer VI", "Thunderbolt VI",
     "Projectile Protection VI", "Experiment the Fish","Grand Experience Bottle", "Experience Bottle",
 ]}
+
+LOW_KEYWORDS = ("experience bottle", "metaphysical serum", "guardian")   # substring match -> always low value
+KNOWN_NAME_RES = [
+    (n, re.compile(r"(?<![\w])" + re.escape(n) + r"(?![\w])"))
+    for n in sorted(HIGH_VALUE | LOW_VALUE, key=len, reverse=True)
+]
 
 TIER_HIGH, TIER_EXP, TIER_LOW, TIER_OTHER = 1, 2, 3, 4   # 4 = unclassified (still pairable, lowest priority)
 GUARDIAN_PROFILE_ID = "f4c2cad70ace4ce6867869d0b653a98b"
@@ -461,8 +469,8 @@ def tile_name(item):
     # Lore lines contain extra text, so search the whole lore for a known enchant (longest name first).
     if name.lower().rstrip("! ") == "rare book":
         joined = " ".join(strip_color(text_of(l)).strip() for l in get_lore(item)).lower()
-        for known_name in sorted(HIGH_VALUE | LOW_VALUE, key=len, reverse=True):
-            if re.search(r"(?<![\w])" + re.escape(known_name) + r"(?![\w])", joined):
+        for known_name, pattern in KNOWN_NAME_RES:
+            if pattern.search(joined):
                 return known_name
         for line in (strip_color(text_of(l)).strip() for l in get_lore(item)):
             if ENCHANT_RE.match(line):
@@ -510,21 +518,25 @@ def tier_of_name(name):
     n = norm_name(name)
     if n in HIGH_VALUE:
         return TIER_HIGH
-    if "guardian" in n or n in LOW_VALUE or LOW_LEVEL_RE.search(n):
+    if n in LOW_VALUE or LOW_LEVEL_RE.search(n) or any(k in n for k in LOW_KEYWORDS):
         return TIER_LOW
     if EXP_RE.search(n) or XP_BLOCK_RE.search(n):
         return TIER_EXP
     return TIER_OTHER
 
 
+@functools.lru_cache(maxsize=4096)
 def tier_of_key(key):
     rest = key.split("|", 1)[1] if "|" in key else key
     tier = tier_of_name(rest.split("|")[0])
+    if tier == TIER_OTHER and any(k in rest.lower() for k in LOW_KEYWORDS):
+        return TIER_LOW   # name didn't match exactly, but key still says bottle/serum/guardian
     if tier == TIER_OTHER and (EXP_RE.search(rest) or XP_BLOCK_RE.search(rest)):
         return TIER_EXP
     return tier
 
 
+@functools.lru_cache(maxsize=4096)
 def rank_of_key(key):
     rest = key.split("|", 1)[1] if "|" in key else key
     return HIGH_VALUE_RANK.get(norm_name(rest.split("|")[0]), NOT_RANKED)
@@ -560,14 +572,14 @@ def wait_hidden(slots, timeout=None):
 
 def settle():
     last, stable, end = None, 0, time.time() + PAIRS_TIMEOUT
-    while time.time() < end and stable < 8:
+    while time.time() < end and stable < SETTLE_STABLE:
         curr = inv.inventory()
         if len(curr) <= PAIRS_BOARD[-1]:
             return
         cur = revealed_set(curr)
         stable = stable + 1 if cur == last else 0
         last = cur
-        time.sleep(0.05)
+        time.sleep(0.03)
 
 
 def find_known_pair(known, high_only=False):
@@ -597,6 +609,7 @@ def remember(known, ignored, slot, key):
         known[slot] = key
 
 
+@functools.lru_cache(maxsize=4096)
 def exp_amount(key):
     block = XP_BLOCK_RE.search(key)
     if block:
