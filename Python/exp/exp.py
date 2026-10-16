@@ -730,6 +730,7 @@ def pairs_game():
             done.add(a)
             target = best_instant_target(live, high_only=not pairing) or (others[0] if others else None)
             if target is not None:
+                print(f"Instant find -> slot {target}")
                 time.sleep(PAIRS_DELAY)
                 inv.throw(target)
                 known.pop(target, None)
@@ -763,9 +764,25 @@ def pairs_game():
             remember(known, ignored, a, key_a)
             continue
 
+        if tile_kind(item_b) == "instant":
+            # Instant Find revealed as the 2nd click: use it just like when it is the 1st click
+            remember(known, ignored, a, key_a)
+            done.add(b)
+            pool = {sl: k for sl, k in known.items() if sl not in done and sl != a}
+            target = best_instant_target(pool, high_only=not pairing) or next(
+                (sl for sl in unknown if sl not in (a, b)), None)
+            if target is not None:
+                print(f"Instant find (2nd click) -> slot {target}")
+                time.sleep(PAIRS_DELAY)
+                inv.throw(target)
+                known.pop(target, None)
+                done.add(target)
+            settle()
+            continue
+
         if tile_kind(item_b) != "normal":
             remember(known, ignored, a, key_a)
-            if tile_kind(item_b) in ("bonus", "instant"):
+            if tile_kind(item_b) == "bonus":
                 done.add(b)
             settle()
             continue
