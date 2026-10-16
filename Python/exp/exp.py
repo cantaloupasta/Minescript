@@ -10,7 +10,7 @@ import functools
 # --- Settings ---------------------------------------------------------------
 spend_bits = True         # True = spend bits to recharge, False to turn off
 is_serum = True           # True = serum active: every round cap is reduced by 4
-SERUM_ROUND_PENALTY = 4
+SERUM_ROUND_PENALTY = 3
 
 chroma_slot = 29
 pairs_slot = 22
@@ -527,10 +527,22 @@ def tier_of_name(name):
     return TIER_OTHER
 
 
+def key_name(key):
+    """Name part of a tile key; unidentified 'Rare Book!' tiles are resolved via the lore text in the key."""
+    rest = key.split("|", 1)[1] if "|" in key else key
+    name = rest.split("|")[0]
+    if name.lower().rstrip("! ") == "rare book":
+        low = strip_color(rest).lower()
+        for known_name, pattern in KNOWN_NAME_RES:
+            if pattern.search(low):
+                return known_name
+    return name
+
+
 @functools.lru_cache(maxsize=4096)
 def tier_of_key(key):
     rest = key.split("|", 1)[1] if "|" in key else key
-    tier = tier_of_name(rest.split("|")[0])
+    tier = tier_of_name(key_name(key))
     if tier == TIER_OTHER and any(k in rest.lower() for k in LOW_KEYWORDS):
         return TIER_LOW   # name didn't match exactly, but key still says bottle/serum/guardian
     if tier == TIER_OTHER and (EXP_RE.search(rest) or XP_BLOCK_RE.search(rest)):
@@ -540,8 +552,7 @@ def tier_of_key(key):
 
 @functools.lru_cache(maxsize=4096)
 def rank_of_key(key):
-    rest = key.split("|", 1)[1] if "|" in key else key
-    return HIGH_VALUE_RANK.get(norm_name(rest.split("|")[0]), NOT_RANKED)
+    return HIGH_VALUE_RANK.get(norm_name(key_name(key)), NOT_RANKED)
 
 
 def revealed_set(curr):
@@ -620,11 +631,11 @@ def exp_amount(key):
     return int(re.search(r"\d+", found.group(0)).group()) if found else 0
 
 
-def best_instant_target(known):
+def best_instant_target(known, high_only=False):
     best = None
     for slot, key in known.items():
         t = tier_of_key(key)
-        if t > TIER_EXP:
+        if t > TIER_EXP or (high_only and t != TIER_HIGH):
             continue
         rank = (t, rank_of_key(key), -exp_amount(key))
         if best is None or rank < best[0]:
@@ -717,7 +728,7 @@ def pairs_game():
 
         if kind_a == "instant":
             done.add(a)
-            target = (best_instant_target(live) if pairing else None) or (others[0] if others else None)
+            target = best_instant_target(live, high_only=not pairing) or (others[0] if others else None)
             if target is not None:
                 time.sleep(PAIRS_DELAY)
                 inv.throw(target)
