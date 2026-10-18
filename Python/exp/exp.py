@@ -9,7 +9,7 @@ import functools
 
 # --- Settings ---------------------------------------------------------------
 spend_bits = True         # True = spend bits to recharge, False to turn off
-is_serum = True           # True = serum active: every round cap is reduced by 4
+is_serum = True           # True = serum active: every round cap is reduced by 3
 SERUM_ROUND_PENALTY = 3
 
 chroma_slot = 29
