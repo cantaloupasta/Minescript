@@ -24,7 +24,6 @@ container slot lib_inv expects. Anything outside 1-28 is rejected at start.
 import time
 import random
 import math
-import queue
 import re
 import tkinter as tk
 import minescript as m
@@ -39,7 +38,9 @@ import lib_inv as inv  # container manipulation (pickup/quickmove/swap/throw/ope
 
 events = EventQueue()
 _Minecraft = JavaClass("net.minecraft.client.Minecraft")
-
+m.entities.set_default_executor(m.script_loop)
+m.player_position.set_default_executor(m.script_loop)
+m.getblocklist.set_default_executor(m.script_loop)
 
 def safe_entities(**kwargs):
     """m.entities() wrapper that swallows the known NaN-velocity Gson crash
@@ -50,6 +51,21 @@ def safe_entities(**kwargs):
     except Exception as e:
         m.log(f"[!] entities() call failed (likely NaN velocity glitch), skipping this poll: {e}")
         return []
+
+# ==============================================================================
+# GEOMETRY HELPER
+# ==============================================================================
+def get_target_orientation(tx, ty, tz, eye_height=1.62, origin=None):
+    """Yaw/pitch (degrees) from the player's eyes to a world point, plus the
+    horizontal distance. Pass `origin=(px, py, pz)` to reuse an already-read
+    player position instead of querying it again (e.g. inside a tight loop)."""
+    px, py, pz = origin if origin is not None else m.player_position()
+    dx, dy, dz = tx - px, ty - (py + eye_height), tz - pz
+    dist_xz = math.sqrt(dx ** 2 + dz ** 2)
+    yaw = -math.atan2(dx, dz) * 180.0 / math.pi
+    pitch = -math.atan2(dy, dist_xz) * 180.0 / math.pi
+    return yaw, pitch, dist_xz
+
 
 # ==============================================================================
 # GOLDEN FISH DETECTOR
@@ -192,11 +208,7 @@ def track_step_look_at(tx, ty, tz, turn_speed=0.35):
     """Small nudge toward target instead of a full eased curve each tick --
     replaying smooth_look_at() every 0.1s is what made tracking look jittery."""
     try:
-        px, py, pz = m.player_position()
-        dx, dy, dz = tx - px, ty - (py + 1.62), tz - pz
-        dist = math.sqrt(dx ** 2 + dz ** 2)
-        target_yaw = -math.atan2(dx, dz) * 180.0 / math.pi
-        target_pitch = -math.atan2(dy, dist) * 180.0 / math.pi
+        target_yaw, target_pitch, _ = get_target_orientation(tx, ty, tz)
 
         current_yaw, current_pitch = m.player_orientation()
         diff_yaw = (target_yaw - current_yaw + 180) % 360 - 180
@@ -221,11 +233,7 @@ def snap_look_at(tx, ty, tz):
     """Instant (no interpolation) orientation snap -- for the jump-peak
     trick where the aim window is too short for a smoothed look."""
     try:
-        px, py, pz = m.player_position()
-        dx, dy, dz = tx - px, ty - (py + 1.62), tz - pz
-        dist = math.sqrt(dx ** 2 + dz ** 2)
-        yaw = -math.atan2(dx, dz) * 180.0 / math.pi
-        pitch = -math.atan2(dy, dist) * 180.0 / math.pi
+        yaw, pitch, _ = get_target_orientation(tx, ty, tz)
         m.player_set_orientation(yaw, pitch)
     except Exception:
         m.player_look_at(tx, ty, tz)
@@ -359,14 +367,21 @@ pet_swap_FRIENDLY_TO_RAW = {i + 1: raw for i, raw in enumerate(pet_swap_RAW_SLOT
 pet_swap_MIN_SLOT = 1
 pet_swap_MAX_SLOT = len(pet_swap_FRIENDLY_TO_RAW)  # 28
 
-pet_swap_GUI_WAIT_SECONDS = 0.2  # time to let the /pets container open before interacting with it
+pet_swap_GUI_WAIT_SECONDS = 0.2
+
+PET_MENU_THROTTLE_TEXT = "This menu has been throttled"
+PET_THROTTLE_BASE = 3.0           # first backoff after a throttle (s)
+PET_THROTTLE_GROWTH = 1.5         # each consecutive throttle multiplies the backoff
+PET_THROTTLE_MAX = 20.0           # backoff cap (s)
+PET_SWAP_GIVE_UP_SECONDS = 90.0   # stop probing after this long
+pet_swap_throttled_until = 0.0
+pet_throttle_backoff = PET_THROTTLE_BASE
 
 # ==============================================================================
 # RUNTIME STATE
 # ==============================================================================
 running = False
 bot_thread = None
-totem_thread_handle = None
 bot_start_time = None
 space_full = False
 current_slot = None
@@ -417,11 +432,7 @@ def smooth_look_to(target_yaw, target_pitch, steps=10):
 def smooth_look_at(tx, ty, tz, base_steps=8):
     """Smoothly interpolates camera to a world position."""
     try:
-        px, py, pz = m.player_position()
-        dx, dy, dz = tx - px, ty - (py + 1.62), tz - pz
-        dist = math.sqrt(dx ** 2 + dz ** 2)
-        target_yaw = -math.atan2(dx, dz) * 180.0 / math.pi
-        target_pitch = -math.atan2(dy, dist) * 180.0 / math.pi
+        target_yaw, target_pitch, _ = get_target_orientation(tx, ty, tz)
         smooth_look_to(target_yaw, target_pitch, steps=base_steps)
     except Exception:
         m.player_look_at(tx, ty, tz)
@@ -479,15 +490,38 @@ def press_attack():
 pet_swap_lock = Lock()
 pet_swap_busy = False
 
+def register_pet_throttle():
+    """Called when the throttle chat line arrives. Starts a backoff window and
+    lengthens the next one. Ignored if we're already backing off, so a late
+    duplicate message doesn't inflate the backoff."""
+    global pet_swap_throttled_until, pet_throttle_backoff
+    now = time.time()
+    if now < pet_swap_throttled_until:
+        return
+    pet_swap_throttled_until = now + pet_throttle_backoff
+    pet_throttle_backoff = min(pet_throttle_backoff * PET_THROTTLE_GROWTH, PET_THROTTLE_MAX)
+
+def wait_for_screen(timeout=3.0):
+    """Polls until any GUI screen is open. Returns False on timeout, or
+    immediately if a throttle message arrives while waiting."""
+    start = time.time()
+    while time.time() - start < timeout:
+        if time.time() < pet_swap_throttled_until:
+            return False
+        try:
+            if m.screen_name():
+                return True
+        except Exception:
+            pass
+        time.sleep(0.02)
+    return False
+
 
 def pet_swap_cycle():
-    """Opens /pets and throws the configured slot (the throw itself closes
-    the container, so no explicit close is needed). Runs on its own thread
-    (see start_pet_swap_cycle) instead of inline in use_rod() -- previously
-    the whole open/sleep/throw sequence blocked fishing_loop's main thread,
-    so an instant bite during that ~0.5s+ window was never scanned for at
-    all until the next pass."""
-    global pet_swap_busy
+    """Opens /pets and throws the configured slot. With no 'cooldown over'
+    message from the game, a throttle is handled by backing off and probing
+    again until the menu opens. Fishing continues the whole time."""
+    global pet_swap_busy, pet_throttle_backoff
     try:
         friendly_slot = int(var_pet_swap_slot.get())
     except ValueError:
@@ -499,16 +533,35 @@ def pet_swap_cycle():
         return
 
     if not pet_swap_lock.acquire(blocking=False):
-        # A previous swap is still running (e.g. two very fast bites back
-        # to back) -- skip rather than stacking a second /pets open on top.
-        m.echo("[*] Pet swap already in progress; skipping this cycle.")
+        # A swap is already running or waiting out a throttle; it covers this one.
         return
 
-    pet_swap_busy = True
     try:
-        m.execute("/pets")
-        time.sleep(pet_swap_GUI_WAIT_SECONDS)
-        inv.throw(raw_slot)
+        deadline = time.time() + PET_SWAP_GIVE_UP_SECONDS
+        while running and time.time() < deadline:
+            # Sit out the backoff window WITHOUT marking busy.
+            while running and time.time() < pet_swap_throttled_until:
+                time.sleep(0.1)
+            if not running:
+                return
+
+            pet_swap_busy = True
+            try:
+                m.execute("/pets")
+                if wait_for_screen():
+                    time.sleep(0.1)   # let the server fill the container's items
+                    inv.throw(raw_slot)
+                    pet_throttle_backoff = PET_THROTTLE_BASE   # success: reset backoff
+                    return
+            finally:
+                pet_swap_busy = False
+
+            if time.time() < pet_swap_throttled_until:
+                continue   # throttled: loop back, wait out the new window, probe again
+            m.echo("[!] /pets never opened (no throttle message); skipping throw.")
+            return
+
+        m.echo("[!] Pet swap gave up after repeated throttles.")
     except Exception as ex:
         m.echo(f"[!] Pet swap cycle failed: {ex}")
     finally:
@@ -602,10 +655,6 @@ def is_strider_target(e):
     return "strider" in str(getattr(e, "type", "")).lower()
 
 
-def is_worm_target(e):
-    return "silverfish" in str(getattr(e, "type", "")).lower()
-
-
 def is_worm_chimney():
     """Chimney = plain look-down fishing (no clearing/totem), same as Default.
     Funnel is the original Worm behavior; left untouched."""
@@ -634,6 +683,8 @@ def mode_needs_chat_listener():
         return True
     if mode == "Worm" and not is_worm_chimney():
         return True
+    if var_pet_swap.get():
+        return True    
     return False
 
 
@@ -664,41 +715,25 @@ def update_chat_listener_state():
             chat_listener_registered = False
 
 
-def attack_magma(detect_distance):
-    """Aim at blazes/zombified piglins and use the ranged weapon until none remain."""
-    m.echo("[*] Space full! Clearing Blazes/Zombified Piglins...")
-    select_slot(real_slot(var_slot_ranged))
+def clear_entity_targets(detect_distance, slot_var, target_predicate, action_fn, msg):
+    """Aim at the nearest matching entity and fire `action_fn` (ranged use or
+    melee attack) with the given hotbar slot until none remain in range."""
+    m.echo(msg)
+    select_slot(real_slot(slot_var))
     while running:
         target = next(
-            (e for e in safe_entities(max_distance=detect_distance, sort="nearest") if is_magma_target(e)),
+            (e for e in safe_entities(max_distance=detect_distance, sort="nearest") if target_predicate(e)),
             None,
         )
         if not target:
             break
         smooth_look_at(target.position[0], target.position[1] + 0.4, target.position[2], base_steps=4)
         time.sleep(random.uniform(0.03, 0.08))
-        press_use()
+        action_fn()
         time.sleep(random.uniform(0.03, 0.08))
 
 
-def attack_strider():
-    """Aim at striders within 5 blocks and melee them until none remain."""
-    m.echo("[*] Space full! Clearing Striders...")
-    select_slot(real_slot(var_slot_melee))
-    while running:
-        target = next(
-            (e for e in safe_entities(max_distance=STRIDER_ATTACK_RANGE, sort="nearest") if is_strider_target(e)),
-            None,
-        )
-        if not target:
-            break
-        smooth_look_at(target.position[0], target.position[1] + 0.4, target.position[2], base_steps=4)
-        time.sleep(random.uniform(0.03, 0.08))
-        press_attack()
-        time.sleep(random.uniform(0.03, 0.08))
-
-
-def attack_worm(detect_distance):
+def attack_worm():
     """Look straight down and use the ranged weapon until all silverfish are dead."""
     m.echo("[*] Space full! Clearing Silverfish...")
     select_slot(real_slot(var_slot_ranged))
@@ -710,11 +745,17 @@ def attack_worm(detect_distance):
 def handle_clearing(mode, detect_distance):
     global space_full
     if mode == "Magma":
-        attack_magma(detect_distance)
+        clear_entity_targets(
+            detect_distance, var_slot_ranged, is_magma_target, press_use,
+            "[*] Space full! Clearing Blazes/Zombified Piglins...",
+        )
     elif mode == "Strider":
-        attack_strider()
+        clear_entity_targets(
+            STRIDER_ATTACK_RANGE, var_slot_melee, is_strider_target, press_attack,
+            "[*] Space full! Clearing Striders...",
+        )
     elif mode == "Worm":
-        attack_worm(detect_distance)
+        attack_worm()
     space_full = False
     return_to_saved_orientation()
 
@@ -771,7 +812,7 @@ def find_totem_target():
             continue
 
         # Reject anything in the saved-orientation's front/back cone; only the sides are valid.
-        block_yaw = -math.atan2(tx - px, tz - pz) * 180.0 / math.pi
+        block_yaw, _, _ = get_target_orientation(tx, ty, tz, origin=(px, py, pz))
         angle = (block_yaw - yaw + 180) % 360 - 180
         if not (TOTEM_SIDE_MIN_ANGLE <= abs(angle) <= TOTEM_SIDE_MAX_ANGLE):
             continue
@@ -794,17 +835,12 @@ def place_totem_cycle():
     # Select totem and place it
     select_slot(real_slot(var_slot_totem))
     time.sleep(0.05)
-    m.player_press_use(True)
-    time.sleep(0.08)
-    m.player_press_use(False)
-    
+    press_use()
+
     return_to_saved_orientation()
     m.echo("[*] Totem placed.")
 
-    try:
-        select_slot(real_slot(var_slot_rod))
-    except NameError:
-        pass
+    select_slot(real_slot(var_slot_rod))
 
 # ==============================================================================
 # MAIN FISHING LOOP
@@ -932,12 +968,16 @@ def fishing_loop():
 # BACKGROUND LISTENERS
 # ==============================================================================
 def chat_listener_worker():
-    global space_full, golden_fish_confirmed, golden_fish_uuid
-    update_chat_listener_state()  # only registers/enables if the starting mode needs it
+    global space_full, golden_fish_confirmed, golden_fish_uuid, pet_swap_throttled_until
+    update_chat_listener_state()
     while True:
         event = events.get()
 
         if event.type != EventType.CHAT:
+            continue
+
+        if PET_MENU_THROTTLE_TEXT in event.message:
+            register_pet_throttle()
             continue
 
         if "There is not enough space" in event.message:
@@ -995,16 +1035,8 @@ def chat_listener_worker():
             m.echo("[*] Golden fish caught!")
             resolve_golden_fish_encounter()
 
-        if "escapes your hook" in msg:
-            time.sleep(random.uniform(0.03, 0.06))
-            uuid, pos = resolve_golden_fish_uuid_and_pos()
-            if uuid:
-                aim_and_use_rod_on_golden_fish(uuid, pos)
-            else:
-                use_rod()
-
-        if "is weak!" in msg:
-            # This is the final reel of the encounter -- the fish gives up
+        if "escapes your hook" in msg or "is weak!" in msg:
+            # "is weak!" is the final reel of the encounter -- the fish gives up
             # and gets caught right after going weak. The actual catch is
             # confirmed separately by GOLDEN_FISH_CATCH_TEXT above/below
             # (the real "you caught a Golden Fish" chat line), so this just
@@ -1159,7 +1191,8 @@ def labeled_entry(parent, label, var):
 frame_pet_swap = tk.LabelFrame(root, text="Pet swap")
 frame_pet_swap.pack(fill="x", padx=10, pady=5)
 chk_pet_swap = tk.Checkbutton(
-    frame_pet_swap, text="Enable Pet swap)", variable=var_pet_swap
+    frame_pet_swap, text="Enable Pet swap", variable=var_pet_swap,
+    command=update_chat_listener_state,
 )
 chk_pet_swap.pack(anchor="w")
 labeled_entry(frame_pet_swap, f"Pet slot (1-{pet_swap_MAX_SLOT})", var_pet_swap_slot)
@@ -1168,15 +1201,19 @@ labeled_entry(frame_pet_swap, f"Pet slot (1-{pet_swap_MAX_SLOT})", var_pet_swap_
 frame_const = tk.LabelFrame(root, text="Configurable Constants")
 frame_const.pack(fill="x", padx=10, pady=5)
 
-labeled_entry(frame_const, "Apnea time (s)", var_apnea)
-labeled_entry(frame_const, "Entity/Bobber Detect distance (m)", var_detect_distance)
-labeled_entry(frame_const, "Bite timeout (s)", var_bite_timeout)
-labeled_entry(frame_const, "Number of timeouts before stopping", var_max_timeouts)
-labeled_entry(frame_const, "Return to lobby after (hours, 0=off)", var_auto_lobby_hours)
-labeled_entry(frame_const, "Rod slot", var_slot_rod)
-labeled_entry(frame_const, "Ranged slot", var_slot_ranged)
-labeled_entry(frame_const, "Deployable slot", var_slot_totem)
-labeled_entry(frame_const, "Melee slot", var_slot_melee)
+CONFIG_FIELDS = [
+    ("Apnea time (s)", var_apnea),
+    ("Entity/Bobber Detect distance (m)", var_detect_distance),
+    ("Bite timeout (s)", var_bite_timeout),
+    ("Number of timeouts before stopping", var_max_timeouts),
+    ("Return to lobby after (hours, 0=off)", var_auto_lobby_hours),
+    ("Rod slot", var_slot_rod),
+    ("Ranged slot", var_slot_ranged),
+    ("Deployable slot", var_slot_totem),
+    ("Melee slot", var_slot_melee),
+]
+for _label, _var in CONFIG_FIELDS:
+    labeled_entry(frame_const, _label, _var)
 
 lbl_error = tk.Label(root, text="", fg="red", wraplength=290)
 lbl_error.pack(pady=(4, 0))
