@@ -903,7 +903,7 @@ def fishing_loop():
                 continue
         # --- clearing interrupt (magma / worm-funnel / strider; Worm/Chimney skips, behaves like Default) ---
         if mode in MODES_WITH_CLEARING and space_full and not is_worm_chimney():
-            use_rod()  # reel in before switching to weapon
+            # No manual reel-in needed: switching hotbar slots reels the rod in automatically.
             handle_clearing(mode, detect_distance)
             use_rod(cast=True)  # recast
             last_action = time.time()
