@@ -31,7 +31,8 @@ import base64
 import json
 
 from system.lib.java import JavaClass
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
+space_event = Event()
 from system.lib.minescript import EventType, EventQueue
 from eventlib import *  # must be imported before any EventQueue() is instantiated
 import lib_inv as inv  # container manipulation (pickup/quickmove/swap/throw/open/close/get_item)
@@ -331,7 +332,7 @@ def golden_fish_tracker_worker():
 # ==============================================================================
 TOTEM_PLACE_RANGE = 5        # totem candidate block must be within this many blocks of the player
 TOTEM_NPC_EXCLUSION = 5      # totem candidate must be MORE than this many blocks from a "CLICK" NPC
-TOTEM_INTERVAL_SECONDS = 302
+TOTEM_INTERVAL_SECONDS = 306
 TOTEM_SIDE_MIN_ANGLE = 45    # candidate must be at least this far (deg) from the saved front
 TOTEM_SIDE_MAX_ANGLE = 135   # and at least this far (deg) from the saved back
 STRIDER_ATTACK_RANGE = 5     # striders must be within this many blocks to be engaged
@@ -376,6 +377,7 @@ PET_THROTTLE_MAX = 20.0           # backoff cap (s)
 PET_SWAP_GIVE_UP_SECONDS = 90.0   # stop probing after this long
 pet_swap_throttled_until = 0.0
 pet_throttle_backoff = PET_THROTTLE_BASE
+clearing_active = False   # True while handle_clearing() runs, so pet swap stays out of the way
 
 # ==============================================================================
 # RUNTIME STATE
@@ -540,17 +542,25 @@ def pet_swap_cycle():
         deadline = time.time() + PET_SWAP_GIVE_UP_SECONDS
         while running and time.time() < deadline:
             # Sit out the backoff window WITHOUT marking busy.
-            while running and time.time() < pet_swap_throttled_until:
+            while running and (time.time() < pet_swap_throttled_until or clearing_active):
                 time.sleep(0.1)
             if not running:
                 return
 
             pet_swap_busy = True
             try:
+                if clearing_active:
+                    continue   # an interrupt started in the gap; back off and retry
                 m.execute("/pets")
                 if wait_for_screen():
                     time.sleep(0.1)   # let the server fill the container's items
                     inv.throw(raw_slot)
+                    time.sleep(0.05)
+                    try:
+                        if m.screen_name():
+                            inv.close()
+                    except Exception:
+                        pass
                     pet_throttle_backoff = PET_THROTTLE_BASE   # success: reset backoff
                     return
             finally:
@@ -588,6 +598,18 @@ def ensure_pet_swap_clear(max_wait=1.5):
     while pet_swap_busy and time.time() - start < max_wait:
         time.sleep(0.02)
 
+def ensure_no_gui(max_wait=2.0):
+    """Waits for any in-flight pet swap to finish, then force-closes any
+    leftover screen so right-clicks reach the world, not a menu."""
+    start = time.time()
+    while pet_swap_busy and time.time() - start < max_wait:
+        time.sleep(0.02)
+    try:
+        if m.screen_name():
+            inv.close()
+            time.sleep(0.1)
+    except Exception:
+        pass
 
 def use_rod(cast=False):
     if var_pet_swap.get():
@@ -660,6 +682,10 @@ def is_worm_chimney():
     Funnel is the original Worm behavior; left untouched."""
     return var_mode.get() == "Worm" and var_worm_submode.get() == "Chimney"
 
+def is_worm_funnel_plus():
+    """Funnel+ = Funnel's silverfish clearing, but only right-clicks the ranged
+    weapon: no look-down, no camera movement at all."""
+    return var_mode.get() == "Worm" and var_worm_submode.get() == "Funnel+"
 
 # ==============================================================================
 # CHAT LISTENER ACTIVATION (mode-gated)
@@ -734,7 +760,15 @@ def clear_entity_targets(detect_distance, slot_var, target_predicate, action_fn,
 
 
 def attack_worm():
-    """Look straight down and use the ranged weapon until all silverfish are dead."""
+    """Use the ranged weapon until all silverfish are dead. Funnel looks
+    straight down first; Funnel+ just right-clicks without touching the camera."""
+    if is_worm_funnel_plus():
+        m.echo("[*] Space full! Clearing Silverfish (Funnel+)...")
+        select_slot(real_slot(var_slot_ranged))
+        time.sleep(random.uniform(0.03, 0.06))
+        press_use()
+        return
+
     m.echo("[*] Space full! Clearing Silverfish...")
     select_slot(real_slot(var_slot_ranged))
     yaw, _ = get_saved_orientation()
@@ -743,21 +777,28 @@ def attack_worm():
 
 
 def handle_clearing(mode, detect_distance):
-    global space_full
-    if mode == "Magma":
-        clear_entity_targets(
-            detect_distance, var_slot_ranged, is_magma_target, press_use,
-            "[*] Space full! Clearing Blazes/Zombified Piglins...",
-        )
-    elif mode == "Strider":
-        clear_entity_targets(
-            STRIDER_ATTACK_RANGE, var_slot_melee, is_strider_target, press_attack,
-            "[*] Space full! Clearing Striders...",
-        )
-    elif mode == "Worm":
-        attack_worm()
+    global space_full, clearing_active
+    clearing_active = True
+    try:
+        ensure_no_gui()   # make sure no pet menu is open before touching hotbar/clicks
+        if mode == "Magma":
+            clear_entity_targets(
+                detect_distance, var_slot_ranged, is_magma_target, press_use,
+                "[*] Space full! Clearing Blazes/Zombified Piglins...",
+            )
+        elif mode == "Strider":
+            clear_entity_targets(
+                STRIDER_ATTACK_RANGE, var_slot_melee, is_strider_target, press_attack,
+                "[*] Space full! Clearing Striders...",
+            )
+        elif mode == "Worm":
+            attack_worm()
+    finally:
+        clearing_active = False
     space_full = False
-    return_to_saved_orientation()
+    space_event.clear()
+    if not (mode == "Worm" and is_worm_funnel_plus()):
+        return_to_saved_orientation()
 
 
 # ==============================================================================
@@ -828,25 +869,26 @@ def place_totem_cycle():
     target = find_totem_target()
     if not target:
         m.echo("[!] No valid totem spot found (side-only, in-reach, NPC-clear).")
-        return
+        return None
     tx, ty, tz = target
     smooth_look_at(tx, ty, tz, base_steps=10)
-    
-    # Select totem and place it
+
     select_slot(real_slot(var_slot_totem))
     time.sleep(0.05)
     press_use()
+    placed_at = time.time()   # cooldown starts here
 
     return_to_saved_orientation()
     m.echo("[*] Totem placed.")
 
     select_slot(real_slot(var_slot_rod))
+    return placed_at
 
 # ==============================================================================
 # MAIN FISHING LOOP
 # ==============================================================================
 def fishing_loop():
-    global running, space_full, leapfrog_initial_y
+    global running, space_full, leapfrog_initial_y, clearing_active
 
     mode = var_mode.get()
     try:
@@ -892,18 +934,22 @@ def fishing_loop():
         # --- totem placement (Worm/Chimney never places, even if checkbox left on) ---
         if var_totem.get() and mode in MODES_ALLOWING_TOTEM and not is_worm_chimney():
             if time.time() - last_totem >= TOTEM_INTERVAL_SECONDS:
-                use_rod()  # reel in the bobber safely before looking away
-                time.sleep(0.05)
-                place_totem_cycle()
-                time.sleep(0.05)
-                use_rod(cast=True)  # cast the bobber back out
-                
+                clearing_active = True      # keeps pet swap from opening /pets
+                try:
+                    ensure_no_gui()         # wait for in-flight swap, close leftover menu
+                    use_rod()               # reel in before looking away
+                    time.sleep(0.05)
+                    placed_at = place_totem_cycle()
+                    time.sleep(0.05)
+                    use_rod(cast=True)      # cast back out
+                finally:
+                    clearing_active = False
+
                 last_action = time.time()
-                last_totem = time.time()
+                last_totem = placed_at or (time.time() - TOTEM_INTERVAL_SECONDS + 5)
                 continue
         # --- clearing interrupt (magma / worm-funnel / strider; Worm/Chimney skips, behaves like Default) ---
         if mode in MODES_WITH_CLEARING and space_full and not is_worm_chimney():
-            # No manual reel-in needed: switching hotbar slots reels the rod in automatically.
             handle_clearing(mode, detect_distance)
             use_rod(cast=True)  # recast
             last_action = time.time()
@@ -935,7 +981,11 @@ def fishing_loop():
             last_action = time.time()
             time.sleep(random.uniform(0.01, 0.03))
             use_rod(cast=True)  # recast
-            time.sleep(1.0)
+            deadline = time.time() + 1.0
+            while running and time.time() < deadline and not space_event.is_set():
+                if var_totem.get() and time.time() - last_totem >= TOTEM_INTERVAL_SECONDS:
+                    break
+                time.sleep(0.02)
 
         # --- timeout / bobber recovery ---
         if not running:
@@ -960,7 +1010,7 @@ def fishing_loop():
                 running = False
                 break
 
-        time.sleep(0.1)
+        space_event.wait(0.1)
     root.after(0, update_button_ui)
 
 
@@ -982,6 +1032,8 @@ def chat_listener_worker():
 
         if "There is not enough space" in event.message:
             space_full = True
+            if mode_wants_clearing():
+                space_event.set()
 
         msg = strip_mc_colors(event.message)
 
@@ -1048,6 +1100,9 @@ def chat_listener_worker():
             else:
                 use_rod()
 
+def mode_wants_clearing():
+    return var_mode.get() in MODES_WITH_CLEARING and not is_worm_chimney()
+
 def mouse_listener_worker():
     with m.EventQueue() as eq:
         eq.register_mouse_listener()
@@ -1095,7 +1150,7 @@ def validate_slots():
 
 
 def toggle_bot():
-    global running, bot_thread, bot_start_time
+    global running, bot_thread, bot_start_time, space_full
     if running:
         running = False
         m.echo("[*] Bot stopped.")
@@ -1109,6 +1164,8 @@ def toggle_bot():
     lbl_error.config(text="")
 
     running = True
+    space_full = False
+    space_event.clear()
     m.echo("[*] Bot started.")
     bot_start_time = time.time()
     btn.config(text="Stop Bot", bg="red")
@@ -1169,6 +1226,10 @@ for mode_name in ("Default", "Treasure", "Trophy", "Magma", "Worm", "Strider"):
         tk.Radiobutton(
             frame_worm_submode, text="Funnel",
             variable=var_worm_submode, value="Funnel", command=on_mode_change,
+        ).pack(side="left")
+        tk.Radiobutton(
+            frame_worm_submode, text="Funnel+",
+            variable=var_worm_submode, value="Funnel+", command=on_mode_change,
         ).pack(side="left")
         tk.Radiobutton(
             frame_worm_submode, text="Chimney",
