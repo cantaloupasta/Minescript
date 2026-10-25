@@ -49,7 +49,7 @@ Resets the bobber when stuck
 
 ## Trophy
 ### Used for Trophy fishing in Lotus Atoll (doesnt work for puddle jumpers or wormholes so acts like the default mode) 
-### Used for Crimson Isle with Golden Fish compatability (This feature has not been tested rigorously)
+### Used for Crimson Isle w/ Golden Fish compatability (This feature has not been tested rigorously)
 ###### Allows deployable placement
 
 ## Magma Core
@@ -70,14 +70,20 @@ Resets the bobber when stuck
 * For the CHIMNEY method:
   * look straight down
   * No weapons needed to kill, only your fishing rod
-  * One shot the Flaming Worms with your rod
+  * One shot the Flaming Worms w/ your rod
     ###### Disables deployable placement
 * For the FUNNEL method:
-  * crouch to the very edge of the pit so that you can hit the worms.
-  * One shot the worms with your ranged weapon
+  * Crouch to the very edge of the pit so that you can hit the worms.
+  * One shot the worms w/ your ranged weapon
+    ###### Allows deployable placement
+* For FUNNEL+ method:
+  * A Hyperion w/ Wither Impact is required (considered as a ranged weapon)
+  * Best used w/ a totem of corruption
+  * Look straight ahead when using your rod and weapon
     ###### Allows deployable placement
 * Build the setup as shown in the images:
-<img width="647" height="273" alt="worm combined" src="https://github.com/user-attachments/assets/73536d21-e4d8-4158-9756-86ed492e5b15" />
+<img width="448" height="244" alt="worm modes" src="https://github.com/user-attachments/assets/97d34764-20ae-4dae-8f54-648ddfae1ddc" />
+
 
 ## Strider
 ### Used for strider fishing in galatea at the foraging fortune booster shop
